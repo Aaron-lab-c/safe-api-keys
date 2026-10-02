@@ -1,0 +1,3 @@
+safe-api-keys[django,drf]
+pytest
+pytest-django

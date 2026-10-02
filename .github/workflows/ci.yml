@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: core (py${{ matrix.python }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        include:
+          - { os: windows-latest, python: "3.12" }
+          - { os: macos-latest, python: "3.12" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python }}" }
+      - name: Install core only
+        run: |
+          python -m pip install -U pip
+          pip install -e .
+          python -c "import importlib.metadata as m; d=m.distribution('safe-api-keys'); assert not d.requires or all('extra ==' in r for r in d.requires)"
+          pip install pytest pytest-asyncio hypothesis
+      - run: python -c "import safe_api_keys"
+      - run: >-
+          pytest -q tests/test_format.py tests/test_hashing.py tests/test_scopes.py tests/test_policy.py
+          tests/test_logic.py tests/test_manager.py tests/test_async_manager.py tests/test_verifier.py
+          tests/test_cache.py tests/test_audit.py tests/test_no_secret_leak.py tests/test_cli.py
+          tests/test_performance.py tests/test_readme.py
+          tests/stores/test_memory.py tests/stores/test_sqlite.py
+          tests/contrib/test_extract.py tests/contrib/test_http.py
+
+  extras:
+    name: ${{ matrix.extra }} (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.12", "3.13"]
+        extra: [fastapi, flask, sqlalchemy14, sqlalchemy20, redis]
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_PASSWORD: pg, POSTGRES_DB: test }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python }}" }
+      - run: python -m pip install -U pip && pip install -e . pytest pytest-asyncio hypothesis
+      - name: Install extra
+        run: |
+          case "${{ matrix.extra }}" in
+            fastapi)      pip install -e ".[fastapi]" ;;
+            flask)        pip install -e ".[flask]" ;;
+            sqlalchemy14) pip install "SQLAlchemy>=1.4,<2" aiosqlite greenlet "psycopg2-binary" ;;
+            sqlalchemy20) pip install "SQLAlchemy>=2,<3" aiosqlite greenlet "psycopg[binary]" ;;
+            redis)        pip install -e ".[redis]" fakeredis ;;
+          esac
+      - name: Test
+        env:
+          SAFE_API_KEYS_TEST_PG_URL: ${{ matrix.extra == 'sqlalchemy14' && 'postgresql+psycopg2://postgres:pg@localhost/test' || matrix.extra == 'sqlalchemy20' && 'postgresql+psycopg://postgres:pg@localhost/test' || '' }}
+        run: |
+          case "${{ matrix.extra }}" in
+            fastapi)  pytest -q tests/contrib/test_fastapi.py tests/contrib/test_starlette.py ;;
+            flask)    pytest -q tests/contrib/test_flask.py ;;
+            sqlalchemy*) pytest -q tests/stores/test_sqlalchemy.py tests/stores/test_sqlalchemy_async.py ;;
+            redis)    pytest -q tests/stores/test_redis.py ;;
+          esac
+
+  django:
+    name: django ${{ matrix.django }} (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { django: "3.2", python: "3.9" }
+          - { django: "3.2", python: "3.10" }
+          - { django: "4.2", python: "3.9" }
+          - { django: "4.2", python: "3.10" }
+          - { django: "4.2", python: "3.11" }
+          - { django: "4.2", python: "3.12" }
+          - { django: "5.2", python: "3.10" }
+          - { django: "5.2", python: "3.11" }
+          - { django: "5.2", python: "3.12" }
+          - { django: "5.2", python: "3.13" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python }}" }
+      - run: |
+          python -m pip install -U pip
+          pip install -e . "Django~=${{ matrix.django }}.0" djangorestframework pytest pytest-asyncio pytest-django hypothesis
+      - run: pytest -q tests/stores/test_django.py tests/contrib/test_django.py tests/contrib/test_drf.py
+      - name: Migration applies and matches models
+        run: |
+          cd examples/django_app
+          python manage.py migrate --noinput
+          python manage.py makemigrations --check --dry-run
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[all]" mypy ruff bandit
+      - run: ruff check src tests examples tools benchmarks
+      - run: mypy --strict src/safe_api_keys --exclude 'contrib|stores/(sqlalchemy|redis|django)'
+      - run: bandit -q -r src -c pyproject.toml
+      - run: python tools/readme_examples.py --check
+
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[all]" pytest pytest-django aiosqlite greenlet alembic flask-sqlalchemy
+      - run: cd examples/flask_app && pytest -q
+      - run: cd examples/django_app && pytest -q
+      - run: cd examples/fastapi_app && pytest -q
+      - run: python benchmarks/bench_verify.py -n 50000
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check --strict dist/*
+      - name: Install wheel in a clean venv and run the README quick start
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install dist/*.whl
+          cd /tmp && /tmp/clean/bin/python "$GITHUB_WORKSPACE/tools/readme_examples.py" --run

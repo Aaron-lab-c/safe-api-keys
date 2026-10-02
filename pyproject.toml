@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "safe-api-keys"
+version = "0.1.0"
+description = "Framework-agnostic API key lifecycle: issue, verify, revoke, rotate, expire, purge and audit."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Aaron-lab-c" }]
+keywords = ["api key", "authentication", "fastapi", "flask", "django", "security"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Framework :: Django",
+    "Framework :: Flask",
+    "Framework :: FastAPI",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+fastapi = ["fastapi>=0.100", "httpx"]
+starlette = ["starlette>=0.27"]
+flask = ["flask>=2.0"]
+django = ["Django>=3.2"]
+drf = ["Django>=3.2", "djangorestframework>=3.12"]
+sqlalchemy = ["SQLAlchemy>=1.4"]
+redis = ["redis>=4"]
+argon2 = ["argon2-cffi"]
+all = [
+    "fastapi>=0.100", "httpx", "flask>=2.0", "Django>=3.2", "djangorestframework>=3.12",
+    "SQLAlchemy>=1.4", "redis>=4", "argon2-cffi",
+]
+dev = [
+    "pytest>=7", "pytest-asyncio>=0.21", "pytest-django>=4.5", "fakeredis>=2.10", "aiosqlite", "greenlet", "hypothesis",
+    "mypy", "ruff", "bandit", "build", "twine",
+]
+
+[project.scripts]
+safe-api-keys = "safe_api_keys.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Aaron-lab-c/safe-api-keys"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+safe_api_keys = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+DJANGO_SETTINGS_MODULE = "tests.django_settings"
+django_find_project = false
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_configs = false
+
+[[tool.mypy.overrides]]
+module = ["safe_api_keys.contrib.*", "safe_api_keys.stores.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+ignore = ["S101", "UP007", "UP006", "UP035", "UP045", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# table name is regex-validated; all values are bound parameters
+"src/safe_api_keys/stores/sqlite.py" = ["S608"]
+"tests/**" = ["S", "B"]
+"examples/**" = ["S", "B"]
+"benchmarks/**" = ["S"]
+
+[tool.bandit]
+exclude_dirs = ["tests", "examples"]

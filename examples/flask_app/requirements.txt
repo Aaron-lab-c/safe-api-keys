@@ -1,0 +1,5 @@
+safe-api-keys[flask,sqlalchemy]
+pytest
+# optional: migrations / Flask-SQLAlchemy integration shown in test_migrations.py
+alembic
+flask-sqlalchemy

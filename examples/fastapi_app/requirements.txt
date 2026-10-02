@@ -1,0 +1,4 @@
+safe-api-keys[fastapi,sqlalchemy]
+aiosqlite
+greenlet
+pytest
