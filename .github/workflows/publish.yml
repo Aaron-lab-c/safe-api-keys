@@ -3,6 +3,7 @@ name: Publish
 on:
   release:
     types: [published]
+  workflow_dispatch:   # Actions 頁面的「Run workflow」按鈕
 
 permissions:
   contents: read
