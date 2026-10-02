@@ -68,3 +68,13 @@ def test_managers_on_redis():
         return (await akm.verify(j.raw_key)).use_count
 
     assert asyncio.run(run()) == 1
+
+
+def test_touch_does_not_leave_a_stub_when_key_vanishes(monkeypatch):
+    client = fakeredis.FakeRedis()
+    s = RedisStore(client, namespace="ns")
+    # the existence check passes, but the record is gone by the time MULTI runs
+    monkeypatch.setattr(client, "hexists", lambda *a, **k: True, raising=False)
+    s.touch("GONEGONEGONE", T0)
+    monkeypatch.undo()
+    assert not client.exists("ns:key:GONEGONEGONE")

@@ -37,7 +37,10 @@ def _dt_type() -> Any:
     """
     from sqlalchemy.dialects import mysql
 
-    return sa.DateTime(timezone=True).with_variant(mysql.DATETIME(fsp=6), "mysql", "mariadb")
+    # chained calls: passing several dialect names to one with_variant() needs SQLAlchemy 2.0
+    return (sa.DateTime(timezone=True)
+            .with_variant(mysql.DATETIME(fsp=6), "mysql")
+            .with_variant(mysql.DATETIME(fsp=6), "mariadb"))
 
 
 def _columns() -> List[sa.Column]:  # type: ignore[type-arg]

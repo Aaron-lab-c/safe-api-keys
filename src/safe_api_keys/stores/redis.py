@@ -116,24 +116,30 @@ class RedisStore:
             raise _wrap(exc) from exc
 
     def touch(self, key_id: str, when: datetime) -> None:
+        # HSET + HINCRBY in one MULTI: atomic and contention-free, so concurrent touches never lose counts.
         k = self._k.key(key_id)
         try:
-            with self.client.pipeline(transaction=True) as pipe:
-                for _ in range(5):
-                    try:
-                        pipe.watch(k)
-                        if not pipe.hexists(k, "hash"):  # never create a partial hash
-                            pipe.unwatch()
-                            return
-                        pipe.multi()
-                        pipe.hset(k, "last_used_at", to_iso(when))
-                        pipe.hincrby(k, "use_count", 1)
-                        pipe.execute()
-                        return
-                    except WatchError:
-                        continue
+            if not self.client.hexists(k, "hash"):
+                return
+            pipe = self.client.pipeline(transaction=True)
+            pipe.hset(k, "last_used_at", to_iso(when))
+            pipe.hincrby(k, "use_count", 1)
+            created, _ = pipe.execute()
+            if created:  # the field was new: the record vanished in between; drop the stub we created
+                self._drop_stub(k)
         except RedisError as exc:
             raise _wrap(exc) from exc
+
+    def _drop_stub(self, k: str) -> None:
+        with self.client.pipeline(transaction=True) as pipe:
+            try:
+                pipe.watch(k)
+                if not pipe.hexists(k, "hash"):
+                    pipe.multi()
+                    pipe.delete(k)
+                    pipe.execute()
+            except WatchError:  # someone wrote the key meanwhile: it is a real record now
+                pass
 
     def _ids(self, owner: Optional[str]) -> List[str]:
         members = self.client.smembers(self._k.owner(owner) if owner is not None else self._k.all)
@@ -221,22 +227,27 @@ class AsyncRedisStore:
     async def touch(self, key_id: str, when: datetime) -> None:
         k = self._k.key(key_id)
         try:
-            async with self.client.pipeline(transaction=True) as pipe:
-                for _ in range(5):
-                    try:
-                        await pipe.watch(k)
-                        if not await pipe.hexists(k, "hash"):
-                            await pipe.unwatch()
-                            return
-                        pipe.multi()
-                        pipe.hset(k, "last_used_at", to_iso(when))
-                        pipe.hincrby(k, "use_count", 1)
-                        await pipe.execute()
-                        return
-                    except WatchError:
-                        continue
+            if not await self.client.hexists(k, "hash"):
+                return
+            pipe = self.client.pipeline(transaction=True)
+            pipe.hset(k, "last_used_at", to_iso(when))
+            pipe.hincrby(k, "use_count", 1)
+            created, _ = await pipe.execute()
+            if created:
+                await self._drop_stub(k)
         except RedisError as exc:
             raise _wrap(exc) from exc
+
+    async def _drop_stub(self, k: str) -> None:
+        async with self.client.pipeline(transaction=True) as pipe:
+            try:
+                await pipe.watch(k)
+                if not await pipe.hexists(k, "hash"):
+                    pipe.multi()
+                    pipe.delete(k)
+                    await pipe.execute()
+            except WatchError:
+                pass
 
     async def list(self, owner: Optional[str] = None, *, include_inactive: bool = False,
                    now: Optional[datetime] = None) -> List[KeyRecord]:
