@@ -55,6 +55,8 @@ safe-api-keys = "safe_api_keys.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Aaron-lab-c/safe-api-keys"
+Changelog = "https://github.com/Aaron-lab-c/safe-api-keys/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Aaron-lab-c/safe-api-keys/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

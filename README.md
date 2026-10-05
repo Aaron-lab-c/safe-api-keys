@@ -1,5 +1,10 @@
 # safe-api-keys
 
+[![PyPI](https://img.shields.io/pypi/v/safe-api-keys.svg)](https://pypi.org/project/safe-api-keys/)
+[![Python versions](https://img.shields.io/pypi/pyversions/safe-api-keys.svg)](https://pypi.org/project/safe-api-keys/)
+[![CI](https://github.com/Aaron-lab-c/safe-api-keys/actions/workflows/ci.yml/badge.svg)](https://github.com/Aaron-lab-c/safe-api-keys/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Aaron-lab-c/safe-api-keys/blob/main/LICENSE)
+
 Framework-agnostic API key lifecycle for Python: **issue, verify, revoke, rotate, expire, purge and audit** —
 with adapters for **FastAPI / Starlette, Flask, Django / DRF** and a framework-free CLI.
 
