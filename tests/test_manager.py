@@ -325,6 +325,85 @@ def test_update_validation_and_policy(clock):
         km.update(c.key_id, expires_in=timedelta(days=1))
 
 
+def test_update_refuses_rotated_key(anykm, clock):
+    """B: a key in its grace period cannot be extended (README: update of a rotated key -> AlreadyRotated)."""
+    old = anykm.issue("alice", expires_in=timedelta(days=90))
+    anykm.rotate(old.key_id, grace=timedelta(hours=24))
+    with pytest.raises(AlreadyRotated):
+        anykm.update(old.key_id, expires_in=timedelta(days=365))
+    assert anykm.get(old.key_id).expires_at == START + timedelta(hours=24)
+    clock.advance(days=30)
+    assert not anykm.check(old.raw_key).ok
+
+
+def test_update_loses_to_concurrent_rotate(clock):
+    """B (race): a rotate() landing between update()'s read and write keeps its grace period."""
+
+    class RotateBeforeUpdateWrite(MemoryStore):
+        hook = None
+
+        def update_fields(self, key_id, fields, **kw):
+            if self.hook:
+                hook, self.hook = self.hook, None
+                hook(key_id)
+            return super().update_fields(key_id, fields, **kw)
+
+    store = RotateBeforeUpdateWrite()
+    km = make_km(store, clock=clock)
+    victim = km.issue("alice", expires_in=timedelta(days=90))
+    store.hook = lambda kid: km.rotate(kid, grace=timedelta(hours=1))
+    with pytest.raises(AlreadyRotated):
+        km.update(victim.key_id, expires_in=timedelta(days=365))
+    assert km.get(victim.key_id).expires_at == START + timedelta(hours=1)
+    clock.advance(days=2)
+    assert not km.check(victim.raw_key).ok
+
+
+def test_update_loses_to_expiry_during_request(clock):
+    """F: a key that expires between update()'s read and write is not revived."""
+
+    class ExpireBeforeUpdateWrite(MemoryStore):
+        hook = None
+
+        def update_fields(self, key_id, fields, **kw):
+            if self.hook:
+                hook, self.hook = self.hook, None
+                hook()
+            return super().update_fields(key_id, fields, **kw)
+
+    store = ExpireBeforeUpdateWrite()
+    km = make_km(store, clock=clock)
+    k = km.issue("alice", expires_in=timedelta(seconds=5))
+    store.hook = lambda: clock.advance(seconds=10)
+    with pytest.raises(ExpiredKey):
+        km.update(k.key_id, expires_in=timedelta(days=30))
+    assert km.get(k.key_id).expires_at == START + timedelta(seconds=5)
+    assert not km.check(k.raw_key).ok
+
+
+def test_concurrent_rotates_produce_one_replacement(clock):
+    """D: two rotate() calls racing on the same key -> the second raises AlreadyRotated, one replacement."""
+
+    class SecondRotate(MemoryStore):
+        hook = None
+
+        def save_rotation(self, new, old):
+            if self.hook:
+                hook, self.hook = self.hook, None
+                hook(old.key_id)
+            return super().save_rotation(new, old)
+
+    store = SecondRotate()
+    km = make_km(store, clock=clock)
+    victim = km.issue("alice")
+    store.hook = lambda kid: km.rotate(kid)          # second request completes inside the first one's window
+    with pytest.raises(AlreadyRotated) as ei:
+        km.rotate(victim.key_id)                     # first request: its write is refused
+    replacements = [r for r in km.list("alice") if r.rotated_from == victim.key_id]
+    assert len(replacements) == 1 and km.get(victim.key_id).rotated_to == replacements[0].key_id
+    assert ei.value.rotated_to == replacements[0].key_id
+
+
 def test_update_loses_to_concurrent_revoke(clock):
     store = MemoryStore()
     km = make_km(store, clock=clock)

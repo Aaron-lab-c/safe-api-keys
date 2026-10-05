@@ -52,19 +52,34 @@ def authenticate_request(request: HttpRequest, scopes: Optional[Sequence[str]] =
 
 
 def attach_user(request: HttpRequest, record: KeyRecord) -> Any:
-    """``request.user = USER_RESOLVER(record.owner)`` when a resolver is configured and finds a user.
+    """With ``USER_RESOLVER`` configured, make the key's owner the request's identity.
 
-    Without a resolver, or when it returns ``None``, ``request.user`` is left as the auth middleware set it.
-    The resolved user (or ``None``) is cached on the request so DRF does not look it up twice.
+    ``request.user`` *and* ``request.auser()`` (Django 5 async views) are set to the resolved user, or to
+    ``AnonymousUser`` when the resolver finds nobody, so a request authenticated by an API key never keeps a
+    session user as a second identity. Without a resolver nothing is touched. The resolver result (or
+    ``None``) is cached on the request so DRF does not look it up twice.
     """
-    from .conf import lookup_user
+    from .conf import get_settings, lookup_user
 
     if hasattr(request, _USER_ATTR):
         return getattr(request, _USER_ATTR)
+    if not get_settings()["USER_RESOLVER"]:
+        setattr(request, _USER_ATTR, None)
+        return None
     user = lookup_user(record.owner)
     setattr(request, _USER_ATTR, user)
-    if user is not None:
-        request.user = user
+    if user is None:
+        from django.contrib.auth.models import AnonymousUser
+
+        identity: Any = AnonymousUser()
+    else:
+        identity = user
+    request.user = identity
+
+    async def auser() -> Any:
+        return identity
+
+    request.auser = auser  # type: ignore[attr-defined]
     return user
 
 

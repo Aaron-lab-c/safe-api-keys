@@ -1,8 +1,10 @@
 """Django admin for API keys.
 
 * list: masked key, owner, name, scopes, state, expiry, last use; search by owner/key_id
-* "Add" issues a key through the KeyManager and shows the raw key **once** on a result page
-* actions: revoke, rotate (new raw key shown once on a result page)
+* "Add" issues a key through the KeyManager and shows the raw key **once** on a result page (needs the
+  ``add`` permission)
+* actions: revoke (needs ``change``), rotate (needs the dedicated ``safe_api_keys.rotate_apikey`` permission,
+  because it hands out a working key; new raw key shown once on a result page)
 * ``hash`` is never displayed; ``hash_alg``/``secret_last4`` and all lifecycle fields are read-only
 * no delete: deleting a row leaves no audit trail, revoke instead (``purge`` removes old rows later)
 
@@ -74,6 +76,11 @@ class APIKeyAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request: Any, obj: Optional[APIKey] = None) -> bool:
         return False  # no audit trail for a delete; revoke instead (purge() cleans up later)
 
+    def has_rotate_permission(self, request: Any) -> bool:
+        """Gate of the rotate action (Django calls ``has_<perm>_permission`` for ``permissions=["rotate"]``)."""
+        opts = self.opts
+        return bool(request.user.has_perm(f"{opts.app_label}.rotate_{opts.model_name}"))
+
     def _show_keys(self, request: Any, issued: List[Dict[str, str]], title: str) -> TemplateResponse:
         opts = self.model._meta
         context = {
@@ -133,7 +140,7 @@ class APIKeyAdmin(admin.ModelAdmin):
             return super().response_add(request, obj, post_url_continue)
         return self._show_keys(request, [issued], "New API key")
 
-    @admin.action(description="Revoke selected API keys")
+    @admin.action(description="Revoke selected API keys", permissions=["change"])
     def revoke_selected(self, request: Any, queryset: Any) -> None:
         km = get_manager()
         n = 0
@@ -143,7 +150,7 @@ class APIKeyAdmin(admin.ModelAdmin):
                 n += 1
         self.message_user(request, f"Revoked {n} key(s).", messages.SUCCESS)
 
-    @admin.action(description="Rotate selected API keys (24h grace)")
+    @admin.action(description="Rotate selected API keys (24h grace)", permissions=["rotate"])
     def rotate_selected(self, request: Any, queryset: Any) -> Any:
         km = get_manager()
         issued: List[Dict[str, str]] = []

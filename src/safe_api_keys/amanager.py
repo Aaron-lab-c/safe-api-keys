@@ -28,7 +28,7 @@ from ._logic import (
 from ._util import to_iso
 from .audit import AuditSink
 from .cache import VerifyCache
-from .exceptions import APIKeyError, RevokedKey, StoreError, UnknownKey
+from .exceptions import APIKeyError, SafeAPIKeysError, StoreError, UnknownKey
 from .format import KeyFormat
 from .hashing import Hasher
 from .manager import _update_extra
@@ -222,13 +222,11 @@ class AsyncKeyManager(AsyncKeyVerifier):
 
     async def _save_rotation(self, new: KeyRecord, old: KeyRecord) -> None:
         save_rotation = getattr(self.store, "save_rotation", None)
-        if callable(save_rotation):  # atomic + conditional: a concurrent revoke wins and nothing is written
+        if callable(save_rotation):  # atomic + conditional: a concurrent revoke/rotate wins, nothing is written
             if not await self._call(save_rotation, new, old):
-                raise await self._rotation_refused(old.key_id)
+                raise await self._refused(old.key_id)
             return
-        current = await self.get(old.key_id)  # best effort for stores without save_rotation
-        if current is None or current.revoked_at is not None:
-            raise await self._rotation_refused(old.key_id)
+        await self._recheck(old.key_id)  # best effort for stores without save_rotation
         save_many = getattr(self.store, "save_many", None)
         if callable(save_many):
             await self._call(save_many, [new, old])
@@ -241,10 +239,19 @@ class AsyncKeyManager(AsyncKeyVerifier):
                         extra={"rotated_to": new.key_id})
             raise
 
-    async def _rotation_refused(self, key_id: str) -> APIKeyError:
-        if await self.get(key_id) is None:
-            return UnknownKey(reason="unknown", key_id=key_id)
-        return RevokedKey(key_id=key_id)
+    async def _recheck(self, key_id: str) -> KeyRecord:
+        current = await self.get(key_id)
+        if current is None:
+            raise UnknownKey(reason="unknown", key_id=key_id)
+        check_rotatable(current, self.now())
+        return current
+
+    async def _refused(self, key_id: str) -> SafeAPIKeysError:
+        try:
+            await self._recheck(key_id)
+        except APIKeyError as exc:
+            return exc
+        return StoreError(f"conditional write for key_id={key_id} was refused but the key looks live")
 
     async def update(self, key_id_or_raw: str, *, name: Optional[str] = None,
                      scopes: Optional[Iterable[str]] = None, expires_at: Optional[datetime] = None,
@@ -261,13 +268,10 @@ class AsyncKeyManager(AsyncKeyVerifier):
             return record
         update_fields = getattr(self.store, "update_fields", None)
         if callable(update_fields):
-            if not await self._call(update_fields, key_id, changes):
-                raise await self._rotation_refused(key_id)
+            if not await self._call(update_fields, key_id, changes, clock=self.now):
+                raise await self._refused(key_id)
         else:
-            current = await self.get(key_id)
-            if current is None or current.revoked_at is not None:
-                raise await self._rotation_refused(key_id)
-            await self._call(self.store.save, current.replace(**changes))
+            await self._call(self.store.save, (await self._recheck(key_id)).replace(**changes))
         self._invalidate(key_id)
         updated = record.replace(**changes)
         self._event("key.updated", at=now, key_id=key_id, owner=record.owner, extra=_update_extra(changes))

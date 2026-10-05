@@ -14,7 +14,17 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 from ..exceptions import MissingDependency, StoreError
 from ..models import KeyRecord
-from .base import COLUMNS, ROTATION_FIELDS, UPDATABLE_FIELDS, fields_to_row, record_to_row, row_to_record
+from .base import (
+    COLUMNS,
+    ROTATION_FIELDS,
+    UPDATABLE_FIELDS,
+    Clock,
+    fields_to_row,
+    is_updatable,
+    now_from,
+    record_to_row,
+    row_to_record,
+)
 
 try:
     import sqlalchemy as sa
@@ -152,18 +162,22 @@ class _Statements:
         return (sa.update(self.table).where(self.c.key_id == key_id)
                 .values(last_used_at=self.dt(when), use_count=self.c.use_count + 1))
 
-    def update_fields(self, key_id: str, fields: Mapping[str, Any]) -> Any:
+    def update_fields(self, key_id: str, fields: Mapping[str, Any], now: datetime) -> Any:
         row = fields_to_row(fields, native_datetime=True, native_json=True, allowed=UPDATABLE_FIELDS)
         if "expires_at" in row:
             row["expires_at"] = self.dt(row["expires_at"])
-        return (sa.update(self.table).where(self.c.key_id == key_id, self.c.revoked_at.is_(None))
+        # live at ``now`` and not rotated: a concurrent revoke/rotate/expiry is never undone
+        return (sa.update(self.table)
+                .where(self.c.key_id == key_id, self.c.revoked_at.is_(None), self.c.rotated_to.is_(None),
+                       sa.or_(self.c.expires_at.is_(None), self.c.expires_at > self.dt(now)))
                 .values(**row))
 
     def rotate_old(self, old: KeyRecord) -> Any:
-        # Partial + conditional update: a key revoked meanwhile is never un-revoked by a rotation.
+        # Partial + conditional update: a key revoked or rotated meanwhile is never overwritten.
         row = self.row(old)
         values = {c: row[c] for c in ROTATION_FIELDS}
-        return (sa.update(self.table).where(self.c.key_id == old.key_id, self.c.revoked_at.is_(None))
+        return (sa.update(self.table)
+                .where(self.c.key_id == old.key_id, self.c.revoked_at.is_(None), self.c.rotated_to.is_(None))
                 .values(**values))
 
     def list(self, owner: Optional[str], include_inactive: bool, now: Optional[datetime]) -> Any:
@@ -243,10 +257,12 @@ class SQLAlchemyStore:
     def touch(self, key_id: str, when: datetime) -> None:
         self._tx(lambda s: s.execute(self._q.touch(key_id, when)))
 
-    def update_fields(self, key_id: str, fields: Mapping[str, Any]) -> bool:
+    def update_fields(self, key_id: str, fields: Mapping[str, Any], *, clock: Optional[Clock] = None) -> bool:
         if not fields:
-            return self.get(key_id) is not None
-        return bool(self._tx(lambda s: s.execute(self._q.update_fields(key_id, fields)).rowcount > 0))
+            return is_updatable(self.get(key_id), now_from(clock))
+        # the clock is read inside the transaction, right before the conditional UPDATE
+        return bool(self._tx(lambda s: s.execute(self._q.update_fields(key_id, fields, now_from(clock)))
+                             .rowcount > 0))
 
     def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
         def run(s: Any) -> bool:
@@ -330,12 +346,14 @@ class AsyncSQLAlchemyStore:
     async def touch(self, key_id: str, when: datetime) -> None:
         await self._tx(lambda s: s.execute(self._q.touch(key_id, when)))
 
-    async def update_fields(self, key_id: str, fields: Mapping[str, Any]) -> bool:
+    async def update_fields(self, key_id: str, fields: Mapping[str, Any], *,
+                            clock: Optional[Clock] = None) -> bool:
         if not fields:
-            return await self.get(key_id) is not None
+            return is_updatable(await self.get(key_id), now_from(clock))
 
         async def run(s: Any) -> bool:
-            return bool((await s.execute(self._q.update_fields(key_id, fields))).rowcount > 0)
+            stmt = self._q.update_fields(key_id, fields, now_from(clock))  # clock read right before the write
+            return bool((await s.execute(stmt)).rowcount > 0)
         return bool(await self._tx(run))
 
     async def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:

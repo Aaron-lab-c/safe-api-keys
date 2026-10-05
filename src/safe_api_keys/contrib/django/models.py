@@ -61,3 +61,5 @@ class APIKey(AbstractAPIKey):
     class Meta(AbstractAPIKey.Meta):
         abstract = False
         app_label = "safe_api_keys"
+        # Rotating hands out a working key, so the admin action needs this permission, not just "change".
+        permissions = [("rotate_apikey", "Can rotate API key")]

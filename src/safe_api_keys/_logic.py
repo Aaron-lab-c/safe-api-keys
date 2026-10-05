@@ -285,14 +285,15 @@ def plan_update(
     ip_allowlist: Optional[Iterable[str]] = None,
     metadata: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Validate an in-place change to a live key and return the changed fields (``{}`` if nothing changes).
+    """Validate an in-place change to a live, not-yet-rotated key and return the changed fields (``{}`` if
+    nothing changes). Raises ``RevokedKey``/``ExpiredKey``/``AlreadyRotated`` otherwise.
 
     ``None`` means "leave as is". The same validation and policy as :func:`build_new_key` applies: scopes
     against ``allowed_scopes``/``allow_no_scope``, the new expiry must be in the future and within
     ``max_ttl``, IPs/CIDRs are normalised, metadata is size/depth checked. Pure: does not persist.
     """
     now = ensure_aware(now, "now")
-    check_live(record, now)
+    check_rotatable(record, now)  # live and not already rotated: a key in its grace period cannot be extended
     changes: Dict[str, Any] = {}
     if name is not None:
         changes["name"] = _validate_text(name, "name", required=False)

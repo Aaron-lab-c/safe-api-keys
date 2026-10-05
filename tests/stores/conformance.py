@@ -136,11 +136,17 @@ class StoreContract:
         assert got.rotated_to == new.key_id and got.expires_at == T0 + timedelta(days=1)
         assert got.use_count == 1 and got.last_used_at == T0 + timedelta(minutes=1) and got.revoked_at is None
         assert store.get(new.key_id) == new
+        # already rotated: a second rotation (double click / concurrent request) is refused, nothing written
+        other = make_record("OTHEROTHEROT", rotated_from=old.key_id)
+        assert store.save_rotation(other, got.replace(rotated_to=other.key_id)) is False
+        assert store.get(old.key_id).rotated_to == new.key_id and store.get(other.key_id) is None
         # grace == 0: the plan revokes the old key in the same write
-        newer = make_record("NEWERNEWERNE", rotated_from=old.key_id)
-        planned = got.replace(rotated_to=newer.key_id, revoked_at=T0 + timedelta(hours=2), revoke_reason="rotated")
+        old2 = make_record("OLD2OLD2OLD2", expires_at=None)
+        store.save(old2)
+        newer = make_record("NEWERNEWERNE", rotated_from=old2.key_id)
+        planned = old2.replace(rotated_to=newer.key_id, revoked_at=T0 + timedelta(hours=2), revoke_reason="rotated")
         assert store.save_rotation(newer, planned) is True
-        got = store.get(old.key_id)
+        got = store.get(old2.key_id)
         assert got.rotated_to == newer.key_id and got.revoked_at == T0 + timedelta(hours=2)
         assert got.revoke_reason == "rotated" and store.get(newer.key_id) == newer
 
@@ -164,20 +170,31 @@ class StoreContract:
         store.save(rec)
         store.touch(rec.key_id, T0 + timedelta(minutes=1))  # concurrent usage must survive the update
         ok = store.update_fields(rec.key_id, {"scopes": ("orders:write",), "expires_at": T0 + timedelta(days=2),
-                                              "ip_allowlist": (), "name": "renamed", "metadata": {"k": [1]}})
+                                              "ip_allowlist": (), "name": "renamed", "metadata": {"k": [1]}},
+                                 clock=lambda: T0)
         assert ok is True
         got = store.get(rec.key_id)
         assert got.scopes == ("orders:write",) and got.expires_at == T0 + timedelta(days=2)
         assert got.ip_allowlist == () and got.name == "renamed" and got.metadata == {"k": [1]}
         assert got.use_count == 1 and got.last_used_at == T0 + timedelta(minutes=1)
         assert got.hash == rec.hash and got.owner == rec.owner and got.revoked_at is None
-        assert store.update_fields(rec.key_id, {}) is True                         # no-op on a live key
-        assert store.update_fields("MISSINGMISSI", {"name": "x"}) is False
+        assert store.update_fields(rec.key_id, {}, clock=lambda: T0) is True                 # no-op on a live key
+        assert store.update_fields("MISSINGMISSI", {"name": "x"}, clock=lambda: T0) is False
+        # expired at write time: refused (the key must not be revived by moving its expiry)
+        assert store.update_fields(rec.key_id, {"expires_at": T0 + timedelta(days=30)},
+                                   clock=lambda: T0 + timedelta(days=2)) is False
+        assert store.update_fields(rec.key_id, {}, clock=lambda: T0 + timedelta(days=2)) is False
+        assert store.get(rec.key_id).expires_at == T0 + timedelta(days=2)
+        # rotated meanwhile: refused (the grace period must not be extended)
+        store.save(got.replace(rotated_to="NEXTNEXTNEXT"))
+        assert store.update_fields(rec.key_id, {"expires_at": T0 + timedelta(days=30)}, clock=lambda: T0) is False
+        assert store.get(rec.key_id).expires_at == T0 + timedelta(days=2)
+        # revoked: refused
         store.save(got.replace(revoked_at=T0 + timedelta(hours=1), revoke_reason="r"))
-        assert store.update_fields(rec.key_id, {"name": "after-revoke"}) is False  # revoked: refused
+        assert store.update_fields(rec.key_id, {"name": "after-revoke"}, clock=lambda: T0) is False
         assert store.get(rec.key_id).name == "renamed"
         with pytest.raises(ValueError):
-            store.update_fields(rec.key_id, {"hash": "x" * 64})                     # not an updatable column
+            store.update_fields(rec.key_id, {"hash": "x" * 64}, clock=lambda: T0)             # not an updatable column
 
     # -- optional ops ------------------------------------------------------------
     def _seed(self, store):

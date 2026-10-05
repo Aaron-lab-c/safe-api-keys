@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 from .._util import UTC, utcnow
 from ..exceptions import MissingDependency, StoreError
 from ..models import KeyRecord
-from .base import COLUMNS, ROTATION_FIELDS, UPDATABLE_FIELDS, row_to_record
+from .base import COLUMNS, ROTATION_FIELDS, UPDATABLE_FIELDS, Clock, now_from, row_to_record
 
 try:
     from django.conf import settings
@@ -102,12 +102,17 @@ class DjangoStore:
         self._run(lambda: self._qs().filter(pk=key_id).update(
             last_used_at=self._db_dt(when), use_count=F("use_count") + 1))
 
-    def update_fields(self, key_id: str, fields: Mapping[str, Any]) -> bool:
+    def _live_qs(self, key_id: str, now: datetime) -> Any:
+        """Rows that are live at ``now`` and not rotated: the write condition of ``update_fields``."""
+        return (self._qs().filter(pk=key_id, revoked_at__isnull=True, rotated_to__isnull=True)
+                .filter(Q(expires_at__isnull=True) | Q(expires_at__gt=self._db_dt(now))))
+
+    def update_fields(self, key_id: str, fields: Mapping[str, Any], *, clock: Optional[Clock] = None) -> bool:
         bad = set(fields) - set(UPDATABLE_FIELDS)
         if bad:
             raise ValueError(f"cannot update columns {sorted(bad)}")
         if not fields:
-            return self.get(key_id) is not None
+            return bool(self._run(lambda: self._live_qs(key_id, now_from(clock)).exists()))
         values: Dict[str, Any] = {}
         for c, v in fields.items():
             if c in _DT:
@@ -117,7 +122,7 @@ class DjangoStore:
             elif c == "metadata":
                 v = dict(v)
             values[c] = v
-        n = self._run(lambda: self._qs().filter(pk=key_id, revoked_at__isnull=True).update(**values))
+        n = self._run(lambda: self._live_qs(key_id, now_from(clock)).update(**values))  # clock read at write
         return int(n) > 0
 
     def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
@@ -126,8 +131,9 @@ class DjangoStore:
 
         def run() -> bool:
             with transaction.atomic(using=self.using):
-                # partial + conditional: a key revoked meanwhile is never un-revoked by a rotation
-                if self._qs().filter(pk=old.key_id, revoked_at__isnull=True).update(**values) == 0:
+                # partial + conditional: a key revoked or rotated meanwhile is never overwritten
+                if self._qs().filter(pk=old.key_id, revoked_at__isnull=True,
+                                     rotated_to__isnull=True).update(**values) == 0:
                     return False
                 self.model(**self._fields(new)).save(using=self.using)
                 return True

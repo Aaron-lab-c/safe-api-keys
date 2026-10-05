@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional
 
 from ..models import KeyRecord
-from .base import UPDATABLE_FIELDS, filter_records, rotation_fields
+from .base import UPDATABLE_FIELDS, Clock, filter_records, is_rotatable, is_updatable, now_from, rotation_fields
 
 if TYPE_CHECKING:  # pragma: no cover
     from .base import AsyncStoreAdapter
@@ -41,23 +41,23 @@ class MemoryStore:
             if rec is not None:  # partial update: only usage fields change
                 self._data[key_id] = rec.replace(last_used_at=when, use_count=rec.use_count + 1)
 
-    def update_fields(self, key_id: str, fields: Mapping[str, Any]) -> bool:
+    def update_fields(self, key_id: str, fields: Mapping[str, Any], *, clock: Optional[Clock] = None) -> bool:
         bad = set(fields) - set(UPDATABLE_FIELDS)
         if bad:
             raise ValueError(f"cannot update columns {sorted(bad)}")
         with self._lock:
             current = self._data.get(key_id)
-            if current is None or current.revoked_at is not None:
-                return False
-            self._data[key_id] = current.replace(**fields)
+            if not is_updatable(current, now_from(clock)):  # clock read under the lock, right before writing
+                return False  # revoked, rotated or expired meanwhile: nothing is written
+            self._data[key_id] = current.replace(**fields)  # type: ignore[union-attr]
             return True
 
     def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
         with self._lock:
             current = self._data.get(old.key_id)
-            if current is None or current.revoked_at is not None:
-                return False  # revoked (or deleted) meanwhile: the revocation wins, nothing is written
-            self._data[old.key_id] = current.replace(**rotation_fields(old))
+            if not is_rotatable(current):
+                return False  # revoked, rotated or deleted meanwhile: that write wins, nothing is written
+            self._data[old.key_id] = current.replace(**rotation_fields(old))  # type: ignore[union-attr]
             self._data[new.key_id] = new.copy()
             return True
 

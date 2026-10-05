@@ -12,7 +12,17 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
 from .._util import to_iso, utcnow
 from ..exceptions import StoreError
 from ..models import KeyRecord
-from .base import COLUMNS, ROTATION_FIELDS, UPDATABLE_FIELDS, fields_to_row, record_to_row, row_to_record
+from .base import (
+    COLUMNS,
+    ROTATION_FIELDS,
+    UPDATABLE_FIELDS,
+    Clock,
+    fields_to_row,
+    is_updatable,
+    now_from,
+    record_to_row,
+    row_to_record,
+)
 
 __all__ = ["SQLiteStore", "SCHEMA_SQL"]
 
@@ -77,7 +87,7 @@ class SQLiteStore:
             "touch": f"UPDATE {t} SET last_used_at = ?, use_count = use_count + 1 WHERE key_id = ?",  # nosec B608
             # partial + conditional: a key revoked meanwhile is never un-revoked by a rotation
             "rotate": f"UPDATE {t} SET {', '.join(f'{c} = :{c}' for c in ROTATION_FIELDS)} "  # nosec B608
-                      "WHERE key_id = :key_id AND revoked_at IS NULL",
+                      "WHERE key_id = :key_id AND revoked_at IS NULL AND rotated_to IS NULL",
             "select": f"SELECT * FROM {t}",  # nosec B608
             "delete": f"DELETE FROM {t} WHERE key_id = ?",  # nosec B608
             "purge": f"DELETE FROM {t} WHERE (revoked_at IS NOT NULL AND revoked_at < ?) "  # nosec B608
@@ -115,14 +125,17 @@ class SQLiteStore:
     def touch(self, key_id: str, when: datetime) -> None:
         self._exec(self._sql["touch"], (to_iso(when), key_id))
 
-    def update_fields(self, key_id: str, fields: Mapping[str, Any]) -> bool:
+    def update_fields(self, key_id: str, fields: Mapping[str, Any], *, clock: Optional[Clock] = None) -> bool:
         row = fields_to_row(fields, allowed=UPDATABLE_FIELDS)
         if not row:
-            return self.get(key_id) is not None
-        # column names come from UPDATABLE_FIELDS (validated by fields_to_row); values are bound parameters
+            return is_updatable(self.get(key_id), now_from(clock))
+        # column names come from UPDATABLE_FIELDS (validated by fields_to_row); values are bound parameters.
+        # Condition: live now and not rotated, so a concurrent revoke/rotate/expiry is never undone.
         sql = (f"UPDATE {self.table} SET {', '.join(f'{c} = :{c}' for c in row)} "  # nosec B608
-               "WHERE key_id = :key_id AND revoked_at IS NULL")
-        return self._exec(sql, {**row, "key_id": key_id}).rowcount > 0
+               "WHERE key_id = :key_id AND revoked_at IS NULL AND rotated_to IS NULL "
+               "AND (expires_at IS NULL OR expires_at > :now)")
+        params = {**row, "key_id": key_id, "now": to_iso(now_from(clock))}  # clock read right before the write
+        return self._exec(sql, params).rowcount > 0
 
     def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
         old_row = record_to_row(old)
