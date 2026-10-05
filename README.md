@@ -114,7 +114,7 @@ from flask import Blueprint, Flask, abort, g, jsonify, request, session
 from sqlalchemy import MetaData, create_engine
 from sqlalchemy.orm import sessionmaker
 
-from safe_api_keys import KeyManager, KeyPolicy
+from safe_api_keys import AlreadyRotated, ExpiredKey, KeyManager, KeyPolicy, RevokedKey
 from safe_api_keys.contrib.flask import APIKeys
 from safe_api_keys.stores import SQLAlchemyStore, make_api_key_table
 
@@ -247,7 +247,10 @@ def create_app(km=None):
     @app.post("/account/api-keys/<key_id>/rotate")
     def rotate_key(key_id):
         _own_key_or_404(key_id)
-        issued = km.rotate(key_id, grace=timedelta(hours=24))   # 舊 key 24 小時後失效
+        try:
+            issued = km.rotate(key_id, grace=timedelta(hours=24))   # 舊 key 24 小時後失效
+        except (RevokedKey, ExpiredKey, AlreadyRotated) as exc:    # 已撤銷／已過期／已輪替過：狀態衝突
+            return jsonify(error="conflict", message=str(exc)), 409
         return jsonify(api_key=issued.raw_key, key_id=issued.record.key_id, masked=issued.record.masked), 201
 
     # ---- 3. 受 API key 保護的對外 API -------------------------------------------------
@@ -372,9 +375,14 @@ def test_self_service_lifecycle(client, clock):
     assert client.get("/api/orders", headers=bearer(raw)).json["error"] == "expired_api_key"
     assert client.get("/api/orders", headers=bearer(new_raw)).status_code == 200
 
+    # rotating a key that already has a replacement (or is expired / revoked) is a 409
+    r2 = client.post(f"/account/api-keys/{key_id}/rotate", json={})
+    assert r2.status_code == 409 and r2.json["error"] == "conflict"
+
     # 5) revoke -> 401
     new_id = r.json["key_id"]
     assert client.delete(f"/account/api-keys/{new_id}", json={}).status_code == 204
+    assert client.post(f"/account/api-keys/{new_id}/rotate", json={}).status_code == 409
     r = client.get("/api/orders", headers=bearer(new_raw))
     assert r.status_code == 401 and r.json["error"] == "revoked_api_key"
     assert r.headers["WWW-Authenticate"].startswith("Bearer")
@@ -541,7 +549,7 @@ from django.http import Http404, HttpResponse, JsonResponse
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_http_methods
 
-from safe_api_keys import PolicyViolation
+from safe_api_keys import AlreadyRotated, ExpiredKey, PolicyViolation, RevokedKey
 from safe_api_keys.contrib.django import get_manager
 
 
@@ -601,7 +609,10 @@ def revoke_key(request, key_id):
 @require_http_methods(["POST"])
 def rotate_key(request, key_id):
     _own_key_or_404(request, key_id)
-    issued = km().rotate(key_id, grace=timedelta(hours=24))
+    try:
+        issued = km().rotate(key_id, grace=timedelta(hours=24))
+    except (RevokedKey, ExpiredKey, AlreadyRotated) as exc:        # 已撤銷／已過期／已輪替過：狀態衝突
+        return JsonResponse({"error": "conflict", "message": str(exc)}, status=409)
     return JsonResponse({"api_key": issued.raw_key, "key_id": issued.record.key_id}, status=201)
 ```
 
@@ -819,6 +830,16 @@ def test_csrf_enforced_like_a_real_server(django_user_model):
     r = anon.post("/api/orders/create/", "{}", content_type="application/json", HTTP_AUTHORIZATION=f"Bearer {raw}")
     assert r.status_code == 403 and r.json()["error"] == "insufficient_scope"   # API key checked, not CSRF
     assert anon.get("/api/orders/", HTTP_AUTHORIZATION=f"Bearer {raw}").status_code == 200
+
+
+def test_rotate_conflicts_are_409(user_client):
+    client, _ = user_client
+    key_id = client.post("/account/api-keys/create/", "{}", content_type="application/json").json()["key_id"]
+    new_id = client.post(f"/account/api-keys/{key_id}/rotate/").json()["key_id"]
+    r = client.post(f"/account/api-keys/{key_id}/rotate/")          # already rotated (still in grace)
+    assert r.status_code == 409 and r.json()["error"] == "conflict" and new_id in r.json()["message"]
+    assert client.post(f"/account/api-keys/{new_id}/revoke/").status_code == 204
+    assert client.post(f"/account/api-keys/{new_id}/rotate/").status_code == 409   # revoked
 
 
 def test_cannot_manage_other_users_keys(user_client, django_user_model):

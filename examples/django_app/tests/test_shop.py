@@ -95,6 +95,16 @@ def test_csrf_enforced_like_a_real_server(django_user_model):
     assert anon.get("/api/orders/", HTTP_AUTHORIZATION=f"Bearer {raw}").status_code == 200
 
 
+def test_rotate_conflicts_are_409(user_client):
+    client, _ = user_client
+    key_id = client.post("/account/api-keys/create/", "{}", content_type="application/json").json()["key_id"]
+    new_id = client.post(f"/account/api-keys/{key_id}/rotate/").json()["key_id"]
+    r = client.post(f"/account/api-keys/{key_id}/rotate/")          # already rotated (still in grace)
+    assert r.status_code == 409 and r.json()["error"] == "conflict" and new_id in r.json()["message"]
+    assert client.post(f"/account/api-keys/{new_id}/revoke/").status_code == 204
+    assert client.post(f"/account/api-keys/{new_id}/rotate/").status_code == 409   # revoked
+
+
 def test_cannot_manage_other_users_keys(user_client, django_user_model):
     client, user = user_client
     other = get_manager().issue(owner="999", scopes=["orders:read"])
