@@ -16,6 +16,7 @@ from ._util import ensure_aware, optional_aware, utcnow
 from .audit import AuditEvent, AuditSink, NullAuditSink, safe_emit
 from .cache import VerifyCache
 from .exceptions import (
+    AlreadyRotated,
     APIKeyError,
     ConfigurationError,
     ExpiredKey,
@@ -253,12 +254,16 @@ def plan_revoke(record: KeyRecord, now: datetime, reason: Optional[str]) -> KeyR
 
 
 def check_rotatable(old: KeyRecord, now: datetime) -> None:
-    """Only a live key can be rotated: a revoked or expired one must not get a working replacement."""
+    """Only a live, not-yet-rotated key can be rotated: a revoked or expired one must not get a working
+    replacement, and a key in its grace period already has one (rotating it again would orphan that
+    replacement and inherit the shortened grace lifetime)."""
     now = ensure_aware(now, "now")
     if old.revoked_at is not None:
         raise RevokedKey(key_id=old.key_id)
     if old.expires_at is not None and old.expires_at <= now:
         raise ExpiredKey(key_id=old.key_id)
+    if old.rotated_to:
+        raise AlreadyRotated(old.key_id, old.rotated_to)
 
 
 def inherited_expiry(old: KeyRecord, now: datetime, policy: KeyPolicy) -> Optional[datetime]:

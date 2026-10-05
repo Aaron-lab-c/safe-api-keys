@@ -14,6 +14,7 @@ from .amanager import AsyncKeyManager, AsyncKeyVerifier
 from .audit import AuditEvent, AuditSink, CallbackAuditSink, LoggingAuditSink, NullAuditSink
 from .cache import VerifyCache
 from .exceptions import (
+    AlreadyRotated,
     APIKeyError,
     ConfigurationError,
     ExpiredKey,
@@ -47,6 +48,6 @@ __all__ = [
     "ExtractConfig", "extract_key", "parse_key", "mask_key", "has_scope", "missing_scopes",
     "SafeAPIKeysError", "APIKeyError", "MissingKey", "MalformedKey", "UnknownKey", "RevokedKey", "ExpiredKey",
     "InsufficientScope", "IPNotAllowed", "StoreError", "PolicyViolation", "ConfigurationError",
-    "MissingDependency", "NotSupported",
+    "MissingDependency", "NotSupported", "AlreadyRotated",
     "__version__",
 ]

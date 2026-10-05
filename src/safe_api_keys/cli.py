@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, TextIO
 from ._util import parse_datetime, parse_duration, utcnow
 from .env import STORE_ENV, pepper_kwargs_from_env
 from .exceptions import (
+    AlreadyRotated,
     APIKeyError,
     ConfigurationError,
     MissingDependency,
@@ -261,6 +262,9 @@ def execute(args: argparse.Namespace, km_factory: Callable[[argparse.Namespace],
             return EXIT_OK
     except APIKeyError as exc:
         err.write(f"error: {exc} ({exc.reason})\n")
+        return EXIT_FAIL
+    except AlreadyRotated as exc:
+        err.write(f"error: {exc}\n")
         return EXIT_FAIL
     except StoreError as exc:
         err.write(f"store error: {exc}\n")

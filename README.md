@@ -1069,7 +1069,9 @@ During the grace period, verifying the old key emits `key.verified` with `extra[
 uses it) and adapters add `Deprecation: true` and `Sunset: <expires_at>` to responses.
 
 Only a live key can be rotated: a revoked one raises `RevokedKey`, an expired one `ExpiredKey` (issue a new key
-instead). A `revoke()` that lands while a `rotate()` is in flight wins: the built-in stores apply the rotation
+instead), and a key already in its grace period raises `AlreadyRotated` (rotate the replacement named in
+`rotated_to` instead, so a double click never orphans a key or inherits the shortened grace lifetime). A
+`revoke()` that lands while a `rotate()` is in flight wins: the built-in stores apply the rotation
 as one atomic, conditional write (`save_rotation`), so the old key stays revoked, no replacement is written and
 `rotate()` raises `RevokedKey`. A custom store gets the same guarantee by implementing
 `save_rotation(new, old) -> bool` (see `safe_api_keys.stores.base.KeyStore`); without it the manager re-checks

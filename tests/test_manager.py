@@ -6,6 +6,7 @@ from unittest import mock
 import pytest
 
 from safe_api_keys import (
+    AlreadyRotated,
     ExpiredKey,
     InsufficientScope,
     IPNotAllowed,
@@ -247,6 +248,17 @@ def test_rotate_refuses_expired_key(anykm, clock):
         anykm.rotate(a.key_id)
     assert anykm.get(a.key_id).rotated_to is None
     assert anykm.list("o", include_inactive=True) == [anykm.get(a.key_id)]  # no replacement was written
+
+
+def test_rotate_refuses_already_rotated_key(anykm):
+    a = anykm.issue("o", expires_in=timedelta(days=90))
+    b = anykm.rotate(a.key_id, grace=timedelta(hours=24))
+    with pytest.raises(AlreadyRotated) as ei:                      # still valid in its grace period, but...
+        anykm.rotate(a.key_id)
+    assert ei.value.key_id == a.key_id and ei.value.rotated_to == b.key_id
+    assert anykm.get(a.key_id).rotated_to == b.key_id               # lineage intact, no orphan key
+    assert len(anykm.list("o", include_inactive=True)) == 2
+    anykm.rotate(b.key_id)                                           # the replacement rotates normally
 
 
 def test_rotate_loses_to_concurrent_revoke(clock):
