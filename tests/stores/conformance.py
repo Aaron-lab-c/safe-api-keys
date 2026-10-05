@@ -28,7 +28,7 @@ class SyncOverAsync:
         attr = getattr(self.inner, name)
         if callable(attr) and (inspect.iscoroutinefunction(attr) or name in
                                ("get", "save", "touch", "list", "delete", "purge", "count_by_hash_alg",
-                                "save_many", "close")):
+                                "save_many", "save_rotation", "close")):
             def run(*a, **kw):
                 res = attr(*a, **kw)
                 return self.loop.run_until_complete(res) if inspect.isawaitable(res) else res
