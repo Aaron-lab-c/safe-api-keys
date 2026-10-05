@@ -38,7 +38,7 @@ from .models import IssuedKey, KeyRecord, ParsedKey, VerifyResult
 from .policy import KeyPolicy
 from .scopes import has_scope, missing_scopes
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "KeyManager", "KeyVerifier", "AsyncKeyManager", "AsyncKeyVerifier",

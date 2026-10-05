@@ -3,12 +3,14 @@
 All notable changes to this project are documented here. The project follows Semantic Versioning; the key
 format and `hash_alg` strings are part of the compatibility contract.
 
-## 0.3.0 — unreleased
+## 0.4.0 — unreleased
+
+Security fixes from the third review round. 0.3.0 was released before they landed, so every item below
+affects 0.3.0 as well.
 
 ### Security
 
-- **Django admin: view-only staff could rotate or revoke any key (high; affects 0.1.0–0.2.0 and the
-  unreleased 0.3.0 before this fix).** The `revoke_selected` and `rotate_selected` actions declared no
+- **Django admin: view-only staff could rotate or revoke any key (high; affects 0.1.0–0.3.0).** The `revoke_selected` and `rotate_selected` actions declared no
   permission, and Django offers such actions to everyone who can open the change list. A staff account with
   only `view_apikey` could run "Rotate selected", receive a working replacement key with the victim's scopes
   (the victim's key expiring 24 h later), or revoke anyone's key. Revoking now requires `change_apikey` and
@@ -16,20 +18,38 @@ format and `hash_alg` strings are part of the compatibility contract.
   staff who need it). If you ran an affected version with non-superuser staff in the admin, review
   `django_admin_log` and the `key.rotated`/`key.revoked` audit events for actions by unexpected users, and
   revoke replacement keys you cannot account for. A GitHub security advisory should accompany this release.
-- `update()` could extend a key that had already been rotated (its grace-period expiry was overwritten),
-  both when called on such a key and when a `rotate()` landed between its read and its write; a scheduled
-  "extend keys that expire soon" job would therefore have kept rotated, possibly leaked, keys alive. It now
-  raises `AlreadyRotated`, and the built-in stores' `update_fields` writes only while `rotated_to IS NULL`.
-- Two `rotate()` calls racing on the same key (a double click) both succeeded, leaving a second valid
-  replacement outside the lineage that nobody received. `save_rotation` now also requires
+- `update()` (0.3.0) could extend a key that had already been rotated (its grace-period expiry was
+  overwritten), both when called on such a key and when a `rotate()` landed between its read and its write; a
+  scheduled "extend keys that expire soon" job would therefore have kept rotated, possibly leaked, keys alive.
+  It now raises `AlreadyRotated`, and the built-in stores' `update_fields` writes only while
+  `rotated_to IS NULL`.
+- Two `rotate()` calls racing on the same key (a double click) both succeeded (0.2.0–0.3.0), leaving a second
+  valid replacement outside the lineage that nobody received. `save_rotation` now also requires
   `rotated_to IS NULL`, so the second call raises `AlreadyRotated` and exactly one replacement exists.
-- A key that expired between `update()`'s read and its write was revived. `update_fields` now takes the
-  manager's `clock` and evaluates `expires_at > now` at write time; the losing call raises `ExpiredKey`.
+- A key that expired between `update()`'s read and its write was revived (0.3.0). `update_fields` now takes
+  the manager's `clock` and evaluates `expires_at > now` at write time; the losing call raises `ExpiredKey`.
 - When a conditional write is refused, the manager re-reads the key and raises the exception matching its
   actual state (`RevokedKey`, `ExpiredKey`, `AlreadyRotated` or `UnknownKey`) instead of always `RevokedKey`.
-- `manage.py check` reported no issue for a pepper shorter than 16 bytes; the first request then failed with
-  a 500. The check now runs the same validation as `KeyManager` and reports `safe_api_keys.E001`; the hints
-  state the real minimum (16 bytes, 32 random bytes recommended).
+- `manage.py check` reported no issue for a pepper shorter than 16 bytes (0.2.0–0.3.0); the first request
+  then failed with a 500. The check now runs the same validation as `KeyManager` and reports
+  `safe_api_keys.E001`; the hints state the real minimum (16 bytes, 32 random bytes recommended).
+
+### Changed
+
+- Django: with `USER_RESOLVER` set, the key's owner is now the request's *only* identity: `request.auser()`
+  (Django 5 async views) returns the same user as `request.user`, and when the resolver finds nobody both are
+  `AnonymousUser` instead of the session cookie's user (0.3.0 set `request.user` only and left it untouched
+  when the resolver found nobody).
+- Optional store method `update_fields(key_id, fields, *, clock)`: the condition is "not revoked, not rotated,
+  not expired at `clock()`", evaluated right before the write. Custom stores that implement it must accept
+  `clock` and read it there. `save_rotation` additionally requires `rotated_to IS NULL`.
+
+### Upgrade notes
+
+- Run `migrate` (migration `0002`) and grant `safe_api_keys.rotate_apikey` to the staff who rotate keys in
+  the admin; it is not implied by `change`.
+
+## 0.3.0 — 2026-10-05
 
 ### Added
 
@@ -42,17 +62,12 @@ format and `hash_alg` strings are part of the compatibility contract.
   `APIKeyMiddleware` answer a genuine browser preflight (`OPTIONS` + `Origin` + `Access-Control-Request-Method`)
   with an empty 204 without a key and without running the view, for CORS layers that only add headers in the
   response phase.
-- Django: with `USER_RESOLVER` set, `APIKeyMiddleware` and `@require_api_key` now make the key's owner the
-  request's identity (previously DRF only): `request.user` and `request.auser()` (Django 5 async views) both
-  return the resolved user, or `AnonymousUser` when the resolver finds nobody, so a session cookie's user is
-  never kept as a second identity next to the API key. `safe_api_keys.contrib.django.conf.lookup_user()`
-  returns the resolver result or `None`.
+- Django: with `USER_RESOLVER` set, `APIKeyMiddleware` and `@require_api_key` now put the resolved user into
+  `request.user` (previously DRF only). `safe_api_keys.contrib.django.conf.lookup_user()` returns the
+  resolver result or `None`.
 
 ### Changed
 
-- Optional store method `update_fields(key_id, fields, *, clock)`: the condition is "not revoked, not rotated,
-  not expired at `clock()`", evaluated right before the write. Custom stores that implement it must read the
-  clock there. `save_rotation` additionally requires `rotated_to IS NULL`.
 - `AlreadyRotated` is now an `APIKeyError` (`status_code` 409, `error_code` `already_rotated`,
   `reason` `rotated`), so an existing `except APIKeyError` around `rotate()` catches it instead of turning
   into a 500. The README lists every exception `rotate()` can raise.
