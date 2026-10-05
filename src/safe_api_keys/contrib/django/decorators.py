@@ -14,7 +14,10 @@ from ...http import sunset_headers
 from ...models import KeyRecord
 from .conf import get_adapter
 
-__all__ = ["require_api_key", "authenticate_request", "error_response_for", "apply_sunset", "client_ip_of"]
+__all__ = ["require_api_key", "authenticate_request", "attach_user", "error_response_for", "apply_sunset",
+           "client_ip_of"]
+
+_USER_ATTR = "_safe_api_keys_user"
 
 
 def client_ip_of(request: HttpRequest, adapter: Any = None) -> Optional[str]:
@@ -43,7 +46,26 @@ def authenticate_request(request: HttpRequest, scopes: Optional[Sequence[str]] =
         adapter.rejected(exc, ip)
         raise
     request.api_key = record  # type: ignore[attr-defined]
+    if not isinstance(existing, KeyRecord):
+        attach_user(request, record)
     return record
+
+
+def attach_user(request: HttpRequest, record: KeyRecord) -> Any:
+    """``request.user = USER_RESOLVER(record.owner)`` when a resolver is configured and finds a user.
+
+    Without a resolver, or when it returns ``None``, ``request.user`` is left as the auth middleware set it.
+    The resolved user (or ``None``) is cached on the request so DRF does not look it up twice.
+    """
+    from .conf import lookup_user
+
+    if hasattr(request, _USER_ATTR):
+        return getattr(request, _USER_ATTR)
+    user = lookup_user(record.owner)
+    setattr(request, _USER_ATTR, user)
+    if user is not None:
+        request.user = user
+    return user
 
 
 def error_response_for(exc: Any) -> JsonResponse:

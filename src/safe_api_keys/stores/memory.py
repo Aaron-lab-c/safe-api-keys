@@ -5,10 +5,10 @@ from __future__ import annotations
 import threading
 from collections import Counter
 from datetime import datetime
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional
 
 from ..models import KeyRecord
-from .base import filter_records, rotation_fields
+from .base import UPDATABLE_FIELDS, filter_records, rotation_fields
 
 if TYPE_CHECKING:  # pragma: no cover
     from .base import AsyncStoreAdapter
@@ -40,6 +40,17 @@ class MemoryStore:
             rec = self._data.get(key_id)
             if rec is not None:  # partial update: only usage fields change
                 self._data[key_id] = rec.replace(last_used_at=when, use_count=rec.use_count + 1)
+
+    def update_fields(self, key_id: str, fields: Mapping[str, Any]) -> bool:
+        bad = set(fields) - set(UPDATABLE_FIELDS)
+        if bad:
+            raise ValueError(f"cannot update columns {sorted(bad)}")
+        with self._lock:
+            current = self._data.get(key_id)
+            if current is None or current.revoked_at is not None:
+                return False
+            self._data[key_id] = current.replace(**fields)
+            return True
 
     def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
         with self._lock:

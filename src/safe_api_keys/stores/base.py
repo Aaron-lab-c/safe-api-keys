@@ -6,13 +6,13 @@ import asyncio
 import functools
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
 from .._util import UTC, from_iso, to_iso
 from ..models import KeyRecord
 
 __all__ = ["KeyStore", "AsyncKeyStore", "AsyncStoreAdapter", "record_to_row", "row_to_record", "COLUMNS",
-           "ROTATION_FIELDS", "rotation_fields", "is_active_at"]
+           "ROTATION_FIELDS", "UPDATABLE_FIELDS", "rotation_fields", "fields_to_row", "is_active_at"]
 
 COLUMNS = (
     "key_id", "prefix", "hash", "hash_alg", "secret_last4", "owner", "name", "scopes", "created_at",
@@ -23,6 +23,8 @@ _DT_FIELDS = ("created_at", "expires_at", "revoked_at", "last_used_at")
 _JSON_FIELDS = ("scopes", "ip_allowlist", "metadata")
 #: The only columns ``save_rotation`` writes on the *old* key (a partial update, like ``touch``).
 ROTATION_FIELDS = ("rotated_to", "expires_at", "revoked_at", "revoke_reason")
+#: The columns ``KeyManager.update`` may change through ``update_fields``.
+UPDATABLE_FIELDS = ("name", "scopes", "expires_at", "ip_allowlist", "metadata")
 
 
 @runtime_checkable
@@ -34,6 +36,11 @@ class KeyStore(Protocol):
     ``revoke``: in one atomic step it must (1) refuse (return ``False`` and write nothing) when the stored
     ``old`` key already has ``revoked_at`` set, otherwise (2) apply only :data:`ROTATION_FIELDS` of ``old``
     as a partial update and (3) save ``new``. Every built-in store implements it.
+
+    ``update_fields(key_id, fields) -> bool`` backs :meth:`KeyManager.update` the same way: a partial update
+    of a subset of :data:`UPDATABLE_FIELDS` (values as :class:`KeyRecord` attributes) that is applied only
+    while ``revoked_at`` is still unset, returning ``False`` (nothing written) otherwise or when the key is
+    missing. Every built-in store implements it.
     """
 
     def get(self, key_id: str) -> Optional[KeyRecord]: ...
@@ -61,10 +68,13 @@ def rotation_fields(old: KeyRecord) -> Dict[str, Any]:
     return {name: getattr(old, name) for name in ROTATION_FIELDS}
 
 
-def record_to_row(record: KeyRecord, *, native_datetime: bool = False, native_json: bool = False) -> Dict[str, Any]:
+def fields_to_row(fields: Mapping[str, Any], *, native_datetime: bool = False, native_json: bool = False,
+                  allowed: Sequence[str] = COLUMNS) -> Dict[str, Any]:
+    """Convert a subset of record attributes to row values (datetimes to ISO text, lists/dicts to JSON)."""
     row: Dict[str, Any] = {}
-    for col in COLUMNS:
-        value = getattr(record, col)
+    for col, value in fields.items():
+        if col not in allowed or col == "key_id":
+            raise ValueError(f"cannot update column {col!r}")
         if col in _DT_FIELDS:
             if value is not None and not native_datetime:
                 value = to_iso(value)
@@ -74,6 +84,12 @@ def record_to_row(record: KeyRecord, *, native_datetime: bool = False, native_js
                 value = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
         row[col] = value
     return row
+
+
+def record_to_row(record: KeyRecord, *, native_datetime: bool = False, native_json: bool = False) -> Dict[str, Any]:
+    row = fields_to_row({col: getattr(record, col) for col in COLUMNS if col != "key_id"},
+                        native_datetime=native_datetime, native_json=native_json)
+    return {"key_id": record.key_id, **row}
 
 
 def _dt(value: Any) -> Optional[datetime]:
@@ -126,7 +142,8 @@ class AsyncStoreAdapter:
 
             threaded = not isinstance(store, MemoryStore)
         self._threaded = threaded
-        for name in ("list", "delete", "purge", "count_by_hash_alg", "close", "save_many", "save_rotation"):
+        for name in ("list", "delete", "purge", "count_by_hash_alg", "close", "save_many", "save_rotation",
+                     "update_fields"):
             if callable(getattr(store, name, None)):
                 setattr(self, name, functools.partial(self._run, name))
 

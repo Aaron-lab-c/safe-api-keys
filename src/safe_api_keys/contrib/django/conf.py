@@ -17,7 +17,7 @@ from ...extract import ExtractConfig
 from ...policy import KeyPolicy
 
 __all__ = ["DEFAULTS", "get_settings", "validate_settings", "get_manager", "reset_manager", "get_adapter",
-           "resolve_user"]
+           "resolve_user", "lookup_user"]
 
 DEFAULTS: Dict[str, Any] = {
     "PREFIX": None,
@@ -35,6 +35,7 @@ DEFAULTS: Dict[str, Any] = {
     "SUNSET_HEADERS": True,
     "PROTECT": [],
     "EXEMPT": [],
+    "CORS_PREFLIGHT": "authenticate",   # or "respond": answer browser preflights with 204, no key, no view
     "USER_RESOLVER": None,
     "AUDIT": "safe_api_keys.audit.LoggingAuditSink",
     "CACHE": None,               # e.g. {"ttl": 5, "maxsize": 10000}
@@ -46,7 +47,8 @@ _TYPES: Dict[str, Any] = {
     "CURRENT_PEPPER": (str, type(None)), "EXTRACT": dict, "TOUCH_INTERVAL": (int, float, type(None)),
     "TRUST_PROXY": bool, "TRUSTED_PROXIES": (list, tuple), "MODEL": str, "STORE": (str, type(None), object),
     "POLICY": (dict, type(None)), "REVEAL_STATE": bool, "SUNSET_HEADERS": bool, "PROTECT": (list, tuple),
-    "EXEMPT": (list, tuple), "USER_RESOLVER": (str, type(None)), "AUDIT": (str, type(None), object),
+    "EXEMPT": (list, tuple), "CORS_PREFLIGHT": str, "USER_RESOLVER": (str, type(None)),
+    "AUDIT": (str, type(None), object),
     "CACHE": (dict, type(None)), "AUTH_SCHEME": str,
 }
 
@@ -89,6 +91,8 @@ def validate_settings() -> Dict[str, Any]:
             raise ValueError("TOUCH_INTERVAL must be >= 0")
         if "." not in cfg["MODEL"]:
             raise ValueError("MODEL must be 'app_label.ModelName'")
+        if cfg["CORS_PREFLIGHT"] not in ("authenticate", "respond"):
+            raise ValueError("CORS_PREFLIGHT must be 'authenticate' or 'respond'")
     except (ValueError, TypeError) as exc:
         raise ImproperlyConfigured(f"SAFE_API_KEYS: {exc}") from exc
     return cfg
@@ -176,15 +180,20 @@ def get_adapter() -> Any:
     return _adapter
 
 
-def resolve_user(owner: str) -> Any:
+def lookup_user(owner: str) -> Any:
+    """``USER_RESOLVER(owner)`` or ``None`` (no resolver configured, or it found nobody)."""
     global _user_resolver
-    cfg = get_settings()
-    path = cfg["USER_RESOLVER"]
-    user = None
-    if path:
-        if _user_resolver is None:
-            _user_resolver = import_string(path)
-        user = _user_resolver(owner)
+    path = get_settings()["USER_RESOLVER"]
+    if not path:
+        return None
+    if _user_resolver is None:
+        _user_resolver = import_string(path)
+    return _user_resolver(owner)
+
+
+def resolve_user(owner: str) -> Any:
+    """Like :func:`lookup_user` but falls back to ``AnonymousUser`` (what DRF puts in ``request.user``)."""
+    user = lookup_user(owner)
     if user is None:
         from django.contrib.auth.models import AnonymousUser
 

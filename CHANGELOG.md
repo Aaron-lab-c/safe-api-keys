@@ -3,10 +3,46 @@
 All notable changes to this project are documented here. The project follows Semantic Versioning; the key
 format and `hash_alg` strings are part of the compatibility contract.
 
+## 0.3.0 — unreleased
+
+### Added
+
+- `KeyManager.update(key_id, *, name=, scopes=, expires_at=|expires_in=, ip_allowlist=, metadata=)` (and the
+  async counterpart): change a live key in place under the same policy checks as `issue()`. Emits
+  `key.updated` with the changed field names. Backed by a new optional store method
+  `update_fields(key_id, fields) -> bool` (partial, conditional on `revoked_at` being unset) that every
+  built-in store implements.
+- Django `SAFE_API_KEYS["CORS_PREFLIGHT"]`: `"authenticate"` (default, as in 0.2.0) or `"respond"`, which makes
+  `APIKeyMiddleware` answer a genuine browser preflight (`OPTIONS` + `Origin` + `Access-Control-Request-Method`)
+  with an empty 204 without a key and without running the view, for CORS layers that only add headers in the
+  response phase.
+- Django: with `USER_RESOLVER` set, `APIKeyMiddleware` and `@require_api_key` now put the resolved user into
+  `request.user` (previously DRF only). When the resolver finds nobody, `request.user` is left untouched.
+  `safe_api_keys.contrib.django.conf.lookup_user()` returns the resolver result or `None`.
+
+### Changed
+
+- `AlreadyRotated` is now an `APIKeyError` (`status_code` 409, `error_code` `already_rotated`,
+  `reason` `rotated`), so an existing `except APIKeyError` around `rotate()` catches it instead of turning
+  into a 500. The README lists every exception `rotate()` can raise.
+- The Flask blueprint guard recognises a CORS preflight only when `Origin` is present too (as the Django
+  middleware does); `safe_api_keys.http.is_cors_preflight()` is the shared check.
+
+### Documentation
+
+- `use_count` counts throttled touches (at most one per `touch_interval`), not requests; it is not suitable
+  for billing or rate limiting.
+- Whether a `key_id` exists is observable through a ~0.1 ms timing difference and is not treated as a secret.
+
 ## 0.2.0 — 2026-10-05
 
 Security fixes from an external review, plus the rotation semantics they led to. Several of these change
 behaviour, hence the minor bump.
+
+**Breaking:** `OPTIONS` requests on Django `PROTECT` paths (and Flask `protect_blueprint`) now require a key.
+Cross-origin callers break unless a CORS middleware above `APIKeyMiddleware` answers the preflight (or, from
+0.3.0, `CORS_PREFLIGHT = "respond"` is set). `rotate()` raises `ExpiredKey`/`AlreadyRotated` where it used to
+succeed, and the replacement key now expires.
 
 ### Security
 

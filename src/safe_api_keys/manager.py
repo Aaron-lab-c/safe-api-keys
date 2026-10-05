@@ -17,6 +17,7 @@ from ._logic import (
     key_id_from,
     plan_revoke,
     plan_rotation,
+    plan_update,
     prepare_raw,
     should_touch,
 )
@@ -33,6 +34,20 @@ __all__ = ["KeyVerifier", "KeyManager"]
 
 T = TypeVar("T")
 _LINEAGE_LIMIT = 1000
+
+
+def _update_extra(changes: Mapping[str, Any]) -> Dict[str, Any]:
+    """Audit payload of ``key.updated``: which fields changed, and the new scopes/expiry/IPs (never metadata)."""
+    extra: Dict[str, Any] = {"fields": sorted(changes)}
+    if "scopes" in changes:
+        extra["scopes"] = list(changes["scopes"])
+    if "expires_at" in changes:
+        extra["expires_at"] = to_iso(changes["expires_at"]) if changes["expires_at"] else None
+    if "ip_allowlist" in changes:
+        extra["ip_allowlist"] = list(changes["ip_allowlist"])
+    if "name" in changes:
+        extra["name"] = changes["name"]
+    return extra
 
 
 class KeyVerifier(_Core):
@@ -249,6 +264,40 @@ class KeyManager(KeyVerifier):
         if self.get(key_id) is None:
             return UnknownKey(reason="unknown", key_id=key_id)
         return RevokedKey(key_id=key_id)
+
+    # -- update -------------------------------------------------------------------
+    def update(self, key_id_or_raw: str, *, name: Optional[str] = None, scopes: Optional[Iterable[str]] = None,
+               expires_at: Optional[datetime] = None, expires_in: Optional[timedelta] = None,
+               ip_allowlist: Optional[Iterable[str]] = None,
+               metadata: Optional[Mapping[str, Any]] = None) -> KeyRecord:
+        """Change a live key in place (``None`` = unchanged) under the same policy checks as :meth:`issue`.
+
+        Emits ``key.updated``. Revoked or expired keys raise ``RevokedKey``/``ExpiredKey`` (issue or rotate
+        instead); a key revoked while the update is in flight stays revoked (``RevokedKey``, nothing written).
+        The expiry can be moved but not removed.
+        """
+        key_id = key_id_from(key_id_or_raw, self.key_format)
+        record = self.get(key_id)
+        if record is None:
+            raise UnknownKey(reason="unknown", key_id=key_id)
+        now = self.now()
+        changes = plan_update(record, now, self.policy, name=name, scopes=scopes, expires_at=expires_at,
+                              expires_in=expires_in, ip_allowlist=ip_allowlist, metadata=metadata)
+        if not changes:
+            return record
+        update_fields = getattr(self.store, "update_fields", None)
+        if callable(update_fields):  # partial + conditional: never un-revokes, never clobbers touch()
+            if not self._call(update_fields, key_id, changes):
+                raise self._rotation_refused(key_id)
+        else:  # best effort for stores without update_fields
+            current = self.get(key_id)
+            if current is None or current.revoked_at is not None:
+                raise self._rotation_refused(key_id)
+            self._call(self.store.save, current.replace(**changes))
+        self._invalidate(key_id)
+        updated = record.replace(**changes)
+        self._event("key.updated", at=now, key_id=key_id, owner=record.owner, extra=_update_extra(changes))
+        return updated
 
     # -- listing / maintenance --------------------------------------------------
     def list(self, owner: Optional[str] = None, *, include_inactive: bool = False) -> List[KeyRecord]:

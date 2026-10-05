@@ -24,8 +24,8 @@ try:
 except ImportError as exc:  # pragma: no cover - depends on extras
     raise MissingDependency("pip install safe-api-keys[drf]") from exc
 
-from .conf import get_adapter, resolve_user
-from .decorators import authenticate_request
+from .conf import get_adapter
+from .decorators import _USER_ATTR, authenticate_request
 
 __all__ = ["APIKeyAuthentication", "HasAPIKey", "HasAPIKeyScope", "HasAnyAPIKeyScope", "APIKeyFailed",
            "exception_handler"]
@@ -56,7 +56,12 @@ class APIKeyAuthentication(BaseAuthentication):
             raise _wrap(exc) from None
         if record is None:
             return None  # let other authenticators try; permissions decide
-        return resolve_user(record.owner), record
+        user = getattr(django_request, _USER_ATTR, None)  # resolved once by authenticate_request
+        if user is None:
+            from django.contrib.auth.models import AnonymousUser
+
+            user = AnonymousUser()
+        return user, record
 
     def authenticate_header(self, request: Any) -> str:
         adapter = get_adapter()

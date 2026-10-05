@@ -24,7 +24,12 @@ def mask_parts(prefix: str, key_id: str, last4: str) -> str:
 
 @dataclass(frozen=True, repr=False)
 class KeyRecord:
-    """One stored key. There is deliberately **no** ``secret`` field (§5.1)."""
+    """One stored key. There is deliberately **no** ``secret`` field (§5.1).
+
+    ``last_used_at``/``use_count`` are *throttled* usage markers: ``verify`` touches them at most once per
+    ``touch_interval`` (60 s by default), so ``use_count`` counts touches, not requests. Use it to tell
+    "still in use" from "idle", never for billing or rate limiting.
+    """
 
     key_id: str
     prefix: str

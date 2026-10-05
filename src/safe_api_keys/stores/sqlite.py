@@ -7,12 +7,12 @@ import re
 import sqlite3
 import threading
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
 
 from .._util import to_iso, utcnow
 from ..exceptions import StoreError
 from ..models import KeyRecord
-from .base import COLUMNS, ROTATION_FIELDS, record_to_row, row_to_record
+from .base import COLUMNS, ROTATION_FIELDS, UPDATABLE_FIELDS, fields_to_row, record_to_row, row_to_record
 
 __all__ = ["SQLiteStore", "SCHEMA_SQL"]
 
@@ -114,6 +114,15 @@ class SQLiteStore:
 
     def touch(self, key_id: str, when: datetime) -> None:
         self._exec(self._sql["touch"], (to_iso(when), key_id))
+
+    def update_fields(self, key_id: str, fields: Mapping[str, Any]) -> bool:
+        row = fields_to_row(fields, allowed=UPDATABLE_FIELDS)
+        if not row:
+            return self.get(key_id) is not None
+        # column names come from UPDATABLE_FIELDS (validated by fields_to_row); values are bound parameters
+        sql = (f"UPDATE {self.table} SET {', '.join(f'{c} = :{c}' for c in row)} "  # nosec B608
+               "WHERE key_id = :key_id AND revoked_at IS NULL")
+        return self._exec(sql, {**row, "key_id": key_id}).rowcount > 0
 
     def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
         old_row = record_to_row(old)

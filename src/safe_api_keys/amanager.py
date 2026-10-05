@@ -21,6 +21,7 @@ from ._logic import (
     key_id_from,
     plan_revoke,
     plan_rotation,
+    plan_update,
     prepare_raw,
     should_touch,
 )
@@ -30,6 +31,7 @@ from .cache import VerifyCache
 from .exceptions import APIKeyError, RevokedKey, StoreError, UnknownKey
 from .format import KeyFormat
 from .hashing import Hasher
+from .manager import _update_extra
 from .models import IssuedKey, KeyRecord, ParsedKey, VerifyResult
 from .policy import KeyPolicy
 
@@ -243,6 +245,33 @@ class AsyncKeyManager(AsyncKeyVerifier):
         if await self.get(key_id) is None:
             return UnknownKey(reason="unknown", key_id=key_id)
         return RevokedKey(key_id=key_id)
+
+    async def update(self, key_id_or_raw: str, *, name: Optional[str] = None,
+                     scopes: Optional[Iterable[str]] = None, expires_at: Optional[datetime] = None,
+                     expires_in: Optional[timedelta] = None, ip_allowlist: Optional[Iterable[str]] = None,
+                     metadata: Optional[Mapping[str, Any]] = None) -> KeyRecord:
+        key_id = key_id_from(key_id_or_raw, self.key_format)
+        record = await self.get(key_id)
+        if record is None:
+            raise UnknownKey(reason="unknown", key_id=key_id)
+        now = self.now()
+        changes = plan_update(record, now, self.policy, name=name, scopes=scopes, expires_at=expires_at,
+                              expires_in=expires_in, ip_allowlist=ip_allowlist, metadata=metadata)
+        if not changes:
+            return record
+        update_fields = getattr(self.store, "update_fields", None)
+        if callable(update_fields):
+            if not await self._call(update_fields, key_id, changes):
+                raise await self._rotation_refused(key_id)
+        else:
+            current = await self.get(key_id)
+            if current is None or current.revoked_at is not None:
+                raise await self._rotation_refused(key_id)
+            await self._call(self.store.save, current.replace(**changes))
+        self._invalidate(key_id)
+        updated = record.replace(**changes)
+        self._event("key.updated", at=now, key_id=key_id, owner=record.owner, extra=_update_extra(changes))
+        return updated
 
     async def list(self, owner: Optional[str] = None, *, include_inactive: bool = False) -> List[KeyRecord]:
         fn = self._require("list")

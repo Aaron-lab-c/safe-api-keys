@@ -38,6 +38,11 @@ def mw_view(request):
     return JsonResponse({"owner": request.api_key.owner})
 
 
+def whoami(request):
+    return JsonResponse({"owner": request.api_key.owner, "user": str(request.user),
+                         "authenticated": request.user.is_authenticated})
+
+
 def mw_health(request):
     return JsonResponse({"ok": True, "has_key": hasattr(request, "api_key")})
 
@@ -83,6 +88,8 @@ urlpatterns = [
     path("mw/orders/", require_api_key(scopes=["orders:read"])(mw_view)),
     path("mw/any/", mw_view),
     path("mw/health/", mw_health),
+    path("mw/whoami/", whoami),
+    path("whoami/", require_api_key(whoami)),
     path("drf/orders/", DRFOrders.as_view()),
     path("drf/any/", DRFAny.as_view()),
     path("drf/plain/", DRFPlain.as_view()),

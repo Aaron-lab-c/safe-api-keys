@@ -28,7 +28,7 @@ class SyncOverAsync:
         attr = getattr(self.inner, name)
         if callable(attr) and (inspect.iscoroutinefunction(attr) or name in
                                ("get", "save", "touch", "list", "delete", "purge", "count_by_hash_alg",
-                                "save_many", "save_rotation", "close")):
+                                "save_many", "save_rotation", "update_fields", "close")):
             def run(*a, **kw):
                 res = attr(*a, **kw)
                 return self.loop.run_until_complete(res) if inspect.isawaitable(res) else res
@@ -157,6 +157,27 @@ class StoreContract:
         missing = make_record("GONEGONEGONE").replace(rotated_to=new.key_id)
         assert store.save_rotation(new, missing) is False
         assert store.get(new.key_id) is None
+
+    # -- update_fields -------------------------------------------------------------
+    def test_update_fields_is_partial_and_conditional(self, store):
+        rec = make_record(expires_at=None)
+        store.save(rec)
+        store.touch(rec.key_id, T0 + timedelta(minutes=1))  # concurrent usage must survive the update
+        ok = store.update_fields(rec.key_id, {"scopes": ("orders:write",), "expires_at": T0 + timedelta(days=2),
+                                              "ip_allowlist": (), "name": "renamed", "metadata": {"k": [1]}})
+        assert ok is True
+        got = store.get(rec.key_id)
+        assert got.scopes == ("orders:write",) and got.expires_at == T0 + timedelta(days=2)
+        assert got.ip_allowlist == () and got.name == "renamed" and got.metadata == {"k": [1]}
+        assert got.use_count == 1 and got.last_used_at == T0 + timedelta(minutes=1)
+        assert got.hash == rec.hash and got.owner == rec.owner and got.revoked_at is None
+        assert store.update_fields(rec.key_id, {}) is True                         # no-op on a live key
+        assert store.update_fields("MISSINGMISSI", {"name": "x"}) is False
+        store.save(got.replace(revoked_at=T0 + timedelta(hours=1), revoke_reason="r"))
+        assert store.update_fields(rec.key_id, {"name": "after-revoke"}) is False  # revoked: refused
+        assert store.get(rec.key_id).name == "renamed"
+        with pytest.raises(ValueError):
+            store.update_fields(rec.key_id, {"hash": "x" * 64})                     # not an updatable column
 
     # -- optional ops ------------------------------------------------------------
     def _seed(self, store):

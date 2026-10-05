@@ -14,12 +14,12 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from .._util import to_iso
 from ..exceptions import MissingDependency, StoreError
 from ..models import KeyRecord
-from .base import COLUMNS, ROTATION_FIELDS, filter_records, record_to_row, row_to_record
+from .base import COLUMNS, ROTATION_FIELDS, UPDATABLE_FIELDS, filter_records, record_to_row, row_to_record
 
 try:
     from redis.exceptions import RedisError, WatchError
@@ -99,6 +99,26 @@ def _queue_rotation(keys: _Keys, pipe: Any, current: KeyRecord, old: KeyRecord, 
     _queue_save(keys, pipe, new)
 
 
+def _queue_update(keys: _Keys, pipe: Any, current: KeyRecord, fields: Mapping[str, Any]) -> None:
+    """MULTI body of ``update_fields``: partial HSET plus the housekeeping TTL (expires_at may change)."""
+    updated = current.replace(**fields)
+    encoded = _encode(updated)
+    k = keys.key(current.key_id)
+    if fields:
+        pipe.hset(k, mapping={c: encoded[c] for c in fields})
+    exp = keys.expire_at(updated)
+    if exp is None:
+        pipe.persist(k)
+    else:
+        pipe.expireat(k, exp)
+
+
+def _check_updatable(fields: Mapping[str, Any]) -> None:
+    bad = set(fields) - set(UPDATABLE_FIELDS)
+    if bad:
+        raise ValueError(f"cannot update columns {sorted(bad)}")
+
+
 def _wrap(exc: Exception) -> StoreError:
     err = StoreError(f"Redis error: {type(exc).__name__}")
     err.__cause__ = exc
@@ -154,6 +174,28 @@ class RedisStore:
                     pipe.execute()
             except WatchError:  # someone wrote the key meanwhile: it is a real record now
                 pass
+
+    def update_fields(self, key_id: str, fields: Mapping[str, Any]) -> bool:
+        _check_updatable(fields)
+        k = self._k.key(key_id)
+        try:
+            with self.client.pipeline(transaction=True) as pipe:
+                for _ in range(_WATCH_RETRIES):
+                    try:
+                        pipe.watch(k)
+                        current = _decode(pipe.hgetall(k))
+                        if current is None or current.revoked_at is not None:
+                            pipe.unwatch()
+                            return False
+                        pipe.multi()
+                        _queue_update(self._k, pipe, current, fields)
+                        pipe.execute()
+                        return True
+                    except WatchError:
+                        continue
+        except RedisError as exc:
+            raise _wrap(exc) from exc
+        raise StoreError("Redis error: update kept conflicting with concurrent writes")
 
     def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
         # WATCH/MULTI: if the old hash changes between the revocation check and EXEC the write is retried,
@@ -285,6 +327,28 @@ class AsyncRedisStore:
                     await pipe.execute()
             except WatchError:
                 pass
+
+    async def update_fields(self, key_id: str, fields: Mapping[str, Any]) -> bool:
+        _check_updatable(fields)
+        k = self._k.key(key_id)
+        try:
+            async with self.client.pipeline(transaction=True) as pipe:
+                for _ in range(_WATCH_RETRIES):
+                    try:
+                        await pipe.watch(k)
+                        current = _decode(await pipe.hgetall(k))
+                        if current is None or current.revoked_at is not None:
+                            await pipe.unwatch()
+                            return False
+                        pipe.multi()
+                        _queue_update(self._k, pipe, current, fields)
+                        await pipe.execute()
+                        return True
+                    except WatchError:
+                        continue
+        except RedisError as exc:
+            raise _wrap(exc) from exc
+        raise StoreError("Redis error: update kept conflicting with concurrent writes")
 
     async def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
         k = self._k.key(old.key_id)
