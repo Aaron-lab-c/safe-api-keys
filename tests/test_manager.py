@@ -221,18 +221,19 @@ def test_rotate_keeps_earlier_expiry_and_zero_grace(anykm):
         anykm.rotate("NOSUCHKEY123")
 
 
-def test_rotate_keeps_expiry_by_default(anykm, clock):
-    """A rotation never extends a key's lifetime: the new key inherits expires_at unless told otherwise."""
+def test_rotate_inherits_lifetime_by_default(anykm, clock):
+    """The new key gets the old key's lifetime counted from now, unless told otherwise."""
     a = anykm.issue("o", expires_in=timedelta(days=30))
+    clock.advance(days=20)
     na = anykm.rotate(a.key_id)
-    assert na.record.expires_at == START + timedelta(days=30)
+    assert na.record.expires_at == START + timedelta(days=50)        # 30 days from the rotation, not 10
     nb = anykm.rotate(na.key_id, expires_in=timedelta(days=90))      # explicit lifetime still wins
-    assert nb.record.expires_at == START + timedelta(days=90)
+    assert nb.record.expires_at == START + timedelta(days=110)
     perpetual = anykm.issue("o")
     assert anykm.rotate(perpetual.key_id).record.expires_at is None  # no expiry -> policy default (none here)
 
 
-def test_rotate_inherited_expiry_capped_by_policy(clock):
+def test_rotate_inherited_lifetime_capped_by_policy(clock):
     km = make_km(clock=clock, policy=KeyPolicy(max_ttl=timedelta(days=365)))
     a = km.issue("o", expires_in=timedelta(days=300))
     km.policy = KeyPolicy(max_ttl=timedelta(days=30))                 # policy tightened after issuance

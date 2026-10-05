@@ -197,9 +197,10 @@ class KeyManager(KeyVerifier):
 
     def rotate(self, key_id_or_raw: str, *, grace: timedelta = timedelta(hours=24),
                expires_in: Optional[timedelta] = None, expires_at: Optional[datetime] = None) -> IssuedKey:
-        """Replace a live key. Without ``expires_in``/``expires_at`` the new key keeps the old key's expiry
-        (a rotation never extends a key's lifetime). Revoked or expired keys cannot be rotated, and a key
-        revoked while the rotation is in flight stays revoked (``RevokedKey``, nothing is written)."""
+        """Replace a live key. Without ``expires_in``/``expires_at`` the new key gets the old key's lifetime
+        counted from now (a 90-day key is replaced by a fresh 90-day key). Revoked or expired keys cannot be
+        rotated, and a key revoked while the rotation is in flight stays revoked (``RevokedKey``, nothing is
+        written)."""
         key_id = key_id_from(key_id_or_raw, self.key_format)
         old = self.get(key_id)
         if old is None:

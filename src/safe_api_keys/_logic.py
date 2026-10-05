@@ -262,13 +262,16 @@ def check_rotatable(old: KeyRecord, now: datetime) -> None:
 
 
 def inherited_expiry(old: KeyRecord, now: datetime, policy: KeyPolicy) -> Optional[datetime]:
-    """Default expiry of a replacement key: the old key's ``expires_at`` (a rotation never extends a key's
-    lifetime), capped at ``policy.max_ttl`` in case the policy was tightened since the key was issued.
+    """Default expiry of a replacement key: the old key's lifetime (``expires_at - created_at``) counted from
+    ``now``, capped at ``policy.max_ttl`` in case the policy was tightened since the key was issued.
     ``None`` (a key without expiry) falls through to the policy defaults in :func:`build_new_key`."""
-    expires_at = old.expires_at
-    if expires_at is not None and policy.max_ttl is not None:
-        expires_at = min(expires_at, ensure_aware(now, "now") + policy.max_ttl)
-    return expires_at
+    if old.expires_at is None:
+        return None
+    now = ensure_aware(now, "now")
+    lifetime = old.expires_at - old.created_at
+    if policy.max_ttl is not None:
+        lifetime = min(lifetime, policy.max_ttl)
+    return now + lifetime
 
 
 def plan_rotation(old: KeyRecord, new_key_id: str, now: datetime, grace: timedelta) -> KeyRecord:

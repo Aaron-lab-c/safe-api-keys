@@ -1030,8 +1030,8 @@ correlation and per-key rate limiting.
 - State decisions (revoked → expired → scope → IP) happen in the core, never via backend TTLs.
 - Usage tracking (`touch`) is a throttled partial update; failures never fail authentication.
 - Rotation is an atomic, conditional write on the built-in stores: a key revoked meanwhile stays revoked.
-- Rotation never extends a key's lifetime (the new key keeps the old expiry by default) and refuses revoked or
-  expired keys.
+- Rotation refuses revoked or expired keys; the replacement gets the old key's lifetime counted from now
+  (never more than `policy.max_ttl`), so a time-limited key never becomes a perpetual one.
 - 401 responses carry `WWW-Authenticate`; 401/403 carry `Cache-Control: no-store`.
 - `X-Forwarded-For` is ignored unless `trust_proxy=True` / `trusted_proxies=[...]`; keys in query strings
   are off by default.
@@ -1058,8 +1058,8 @@ Step-by-step table creation for **Flask (create_all / Alembic / Flask-SQLAlchemy
 
 ```python
 new = km.rotate(old_key_id, grace=timedelta(hours=24))   # new key inherits owner/name/scopes/metadata/IPs
-# ...and the old key's expires_at: a rotation never extends a key's lifetime (pass expires_in=/expires_at=
-# for a new lifetime; a key without expiry gets the policy default, as on issue)
+# ...and the old key's lifetime, counted from now: a 90-day key is replaced by a fresh 90-day key (pass
+# expires_in=/expires_at= for another lifetime; a key without expiry gets the policy default, as on issue)
 # old key: expires_at = min(original, now + 24h), rotated_to = new.key_id
 # grace=timedelta(0) revokes the old key immediately
 km.lineage(new.key_id)                                     # whole chain, oldest first
