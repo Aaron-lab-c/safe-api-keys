@@ -82,6 +82,36 @@ def test_middleware_protect_exempt(client):
     assert APIKey.objects.get(pk=j.key_id).use_count == 1  # middleware verified; decorator re-checked scopes
 
 
+def test_middleware_authenticates_options(client):
+    """A view behind PROTECT never runs for an OPTIONS request without a key (CORS layers go above us)."""
+    km = get_manager()
+    r = client.options("/mw/any/")
+    assert r.status_code == 401 and r.json()["error"] == "missing_api_key"
+    r = client.options("/mw/any/", HTTP_ORIGIN="https://app.example", HTTP_ACCESS_CONTROL_REQUEST_METHOD="GET")
+    assert r.status_code == 401
+    i = km.issue("u1")
+    assert client.options("/mw/any/", **bearer(i.raw_key)).json() == {"owner": "u1"}
+    assert client.options("/mw/health/").status_code == 200
+
+
+def test_system_check_warns_without_pepper(settings, monkeypatch):
+    from django.core import checks
+
+    from safe_api_keys.contrib.django.checks import E001, W001, check_pepper
+
+    assert check_pepper() == []                                   # PEPPERS configured in the test settings
+    monkeypatch.delenv("SAFE_API_KEYS_PEPPER", raising=False)
+    monkeypatch.delenv("SAFE_API_KEYS_PEPPERS", raising=False)
+    settings.SAFE_API_KEYS = {"PREFIX": "sk"}
+    found = check_pepper()
+    assert [m.id for m in found] == [W001] and isinstance(found[0], checks.Warning)
+    assert "SAFE_API_KEYS_PEPPER" in found[0].msg
+    assert W001 in {m.id for m in checks.run_checks(tags=[checks.Tags.security])}  # registered with Django
+    monkeypatch.setenv("SAFE_API_KEYS_PEPPERS", "garbage-without-version")
+    found = check_pepper()
+    assert [m.id for m in found] == [E001] and isinstance(found[0], checks.Error)
+
+
 def test_drf(client, django_user_model):
     km = get_manager()
     django_user_model.objects.create(username="alice")
@@ -203,6 +233,9 @@ def test_admin(admin_client_logged_in):
     shown = re.search(r"sk_test_[0-9A-Za-z]{12}_[0-9A-Za-z]{38}", html)
     assert shown and "not be shown again" in html
     assert km.verify(shown.group(0)).key_id == new.key_id
+    assert r.status_code == 200 and not r.redirect_chain                   # rendered directly, no redirect
+    cookies = " ".join(f"{k}={v.value}" for k, v in c.cookies.items())
+    assert shown.group(0) not in cookies and "messages" not in c.cookies    # never in the messages cookie
     again = c.get("/admin/safe_api_keys/apikey/").content.decode()
     assert shown.group(0) not in again  # only shown once
 
@@ -213,6 +246,13 @@ def test_admin(admin_client_logged_in):
                follow=True)
     rotated = re.search(r"sk_test_[0-9A-Za-z]{12}_[0-9A-Za-z]{38}", r.content.decode())
     assert rotated and km.verify(rotated.group(0)).rotated_from == new.key_id
+    assert not r.redirect_chain and rotated.group(0) not in " ".join(v.value for v in c.cookies.values())
+    assert rotated.group(0) not in c.get("/admin/safe_api_keys/apikey/").content.decode()
+    # deleting leaves no audit trail: the admin only revokes
+    assert c.get(f"/admin/safe_api_keys/apikey/{new.key_id}/delete/").status_code == 403
+    assert "delete_selected" not in c.get("/admin/safe_api_keys/apikey/").content.decode()
+    c.post("/admin/safe_api_keys/apikey/", {"action": "delete_selected", "_selected_action": [new.key_id]})
+    assert APIKey.objects.filter(pk=new.key_id).exists()
     c.post("/admin/safe_api_keys/apikey/", {"action": "revoke_selected", "_selected_action": [existing.key_id]})
     assert APIKey.objects.get(pk=existing.key_id).revoked_at is not None
     c.post(f"/admin/safe_api_keys/apikey/{existing.key_id}/change/", {"name": "renamed"})

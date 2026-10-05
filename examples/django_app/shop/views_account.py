@@ -13,7 +13,7 @@ from django.http import Http404, HttpResponse, JsonResponse
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_http_methods
 
-from safe_api_keys import PolicyViolation
+from safe_api_keys import AlreadyRotated, ExpiredKey, PolicyViolation, RevokedKey
 from safe_api_keys.contrib.django import get_manager
 
 
@@ -73,5 +73,8 @@ def revoke_key(request, key_id):
 @require_http_methods(["POST"])
 def rotate_key(request, key_id):
     _own_key_or_404(request, key_id)
-    issued = km().rotate(key_id, grace=timedelta(hours=24))
+    try:
+        issued = km().rotate(key_id, grace=timedelta(hours=24))
+    except (RevokedKey, ExpiredKey, AlreadyRotated) as exc:        # 已撤銷／已過期／已輪替過：狀態衝突
+        return JsonResponse({"error": "conflict", "message": str(exc)}, status=409)
     return JsonResponse({"api_key": issued.raw_key, "key_id": issued.record.key_id}, status=201)

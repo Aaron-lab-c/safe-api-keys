@@ -14,6 +14,7 @@ __all__ = [
     "NotSupported",
     "StoreError",
     "PolicyViolation",
+    "AlreadyRotated",
     "APIKeyError",
     "MissingKey",
     "MalformedKey",
@@ -55,6 +56,19 @@ class StoreError(SafeAPIKeysError):
 
 class PolicyViolation(SafeAPIKeysError, ValueError):
     """``issue``/``rotate`` parameters violate the configured :class:`KeyPolicy`."""
+
+
+class AlreadyRotated(SafeAPIKeysError):
+    """``rotate`` was called on a key that already has a replacement (``rotated_to`` is set).
+
+    The key still verifies during its grace period, so this is a lifecycle error, not a verification
+    failure: rotate ``rotated_to`` instead.
+    """
+
+    def __init__(self, key_id: str, rotated_to: str) -> None:
+        self.key_id = key_id
+        self.rotated_to = rotated_to
+        super().__init__(f"key {key_id} was already rotated to {rotated_to}; rotate that key instead")
 
 
 class APIKeyError(SafeAPIKeysError):

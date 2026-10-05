@@ -10,8 +10,10 @@ from ._logic import (
     Clock,
     _Core,
     build_new_key,
+    check_rotatable,
     check_secret,
     decide,
+    inherited_expiry,
     key_id_from,
     plan_revoke,
     plan_rotation,
@@ -195,13 +197,18 @@ class KeyManager(KeyVerifier):
 
     def rotate(self, key_id_or_raw: str, *, grace: timedelta = timedelta(hours=24),
                expires_in: Optional[timedelta] = None, expires_at: Optional[datetime] = None) -> IssuedKey:
+        """Replace a live key. Without ``expires_in``/``expires_at`` the new key gets the old key's lifetime
+        counted from now (a 90-day key is replaced by a fresh 90-day key). Revoked, expired or already rotated
+        keys cannot be rotated (``RevokedKey`` / ``ExpiredKey`` / ``AlreadyRotated``), and a key revoked while
+        the rotation is in flight stays revoked (``RevokedKey``, nothing is written)."""
         key_id = key_id_from(key_id_or_raw, self.key_format)
         old = self.get(key_id)
         if old is None:
             raise UnknownKey(reason="unknown", key_id=key_id)
-        if old.revoked_at is not None:
-            raise RevokedKey(key_id=key_id)
         now = self.now()
+        check_rotatable(old, now)
+        if expires_at is None and expires_in is None:
+            expires_at = inherited_expiry(old, now, self.policy)
         plan_rotation(old, "x" * self.key_format.key_id_len, now, grace)  # validate grace first
         # max_active_keys_per_owner is not enforced here: rotation replaces a key, it doesn't add one.
         issued = self._new_unique(now, None, owner=old.owner, scopes=old.scopes, expires_at=expires_at,
@@ -216,6 +223,16 @@ class KeyManager(KeyVerifier):
         return issued
 
     def _save_rotation(self, new: KeyRecord, old: KeyRecord) -> None:
+        save_rotation = getattr(self.store, "save_rotation", None)
+        if callable(save_rotation):  # atomic + conditional: a concurrent revoke wins and nothing is written
+            if not self._call(save_rotation, new, old):
+                raise self._rotation_refused(old.key_id)
+            return
+        # Stores without save_rotation: re-check right before writing. A small window remains; implement
+        # save_rotation (see stores.base.KeyStore) to close it.
+        current = self.get(old.key_id)
+        if current is None or current.revoked_at is not None:
+            raise self._rotation_refused(old.key_id)
         save_many = getattr(self.store, "save_many", None)
         if callable(save_many):  # transactional backends: both or neither
             self._call(save_many, [new, old])
@@ -227,6 +244,11 @@ class KeyManager(KeyVerifier):
             self._event("key.rotate_partial", key_id=old.key_id, owner=old.owner,
                         extra={"rotated_to": new.key_id})
             raise
+
+    def _rotation_refused(self, key_id: str) -> APIKeyError:
+        if self.get(key_id) is None:
+            return UnknownKey(reason="unknown", key_id=key_id)
+        return RevokedKey(key_id=key_id)
 
     # -- listing / maintenance --------------------------------------------------
     def list(self, owner: Optional[str] = None, *, include_inactive: bool = False) -> List[KeyRecord]:

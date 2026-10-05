@@ -28,7 +28,7 @@ class SyncOverAsync:
         attr = getattr(self.inner, name)
         if callable(attr) and (inspect.iscoroutinefunction(attr) or name in
                                ("get", "save", "touch", "list", "delete", "purge", "count_by_hash_alg",
-                                "save_many", "close")):
+                                "save_many", "save_rotation", "close")):
             def run(*a, **kw):
                 res = attr(*a, **kw)
                 return self.loop.run_until_complete(res) if inspect.isawaitable(res) else res
@@ -123,6 +123,40 @@ class StoreContract:
             t.join()
         assert not errors
         assert store.get(rec.key_id).use_count == 800
+
+    # -- save_rotation -------------------------------------------------------------
+    def test_save_rotation_is_partial_update(self, store):
+        old = make_record("OLDOLDOLDOLD", expires_at=None)
+        store.save(old)
+        store.touch(old.key_id, T0 + timedelta(minutes=1))  # concurrent usage must survive the rotation write
+        new = make_record("NEWNEWNEWNEW", rotated_from=old.key_id)
+        planned = old.replace(rotated_to=new.key_id, expires_at=T0 + timedelta(days=1))
+        assert store.save_rotation(new, planned) is True
+        got = store.get(old.key_id)
+        assert got.rotated_to == new.key_id and got.expires_at == T0 + timedelta(days=1)
+        assert got.use_count == 1 and got.last_used_at == T0 + timedelta(minutes=1) and got.revoked_at is None
+        assert store.get(new.key_id) == new
+        # grace == 0: the plan revokes the old key in the same write
+        newer = make_record("NEWERNEWERNE", rotated_from=old.key_id)
+        planned = got.replace(rotated_to=newer.key_id, revoked_at=T0 + timedelta(hours=2), revoke_reason="rotated")
+        assert store.save_rotation(newer, planned) is True
+        got = store.get(old.key_id)
+        assert got.rotated_to == newer.key_id and got.revoked_at == T0 + timedelta(hours=2)
+        assert got.revoke_reason == "rotated" and store.get(newer.key_id) == newer
+
+    def test_save_rotation_refuses_revoked_or_missing(self, store):
+        old = make_record("OLDOLDOLDOLD")
+        store.save(old.replace(revoked_at=T0 + timedelta(minutes=5), revoke_reason="compromised"))
+        new = make_record("NEWNEWNEWNEW", rotated_from=old.key_id)
+        planned = old.replace(rotated_to=new.key_id, expires_at=T0 + timedelta(days=1))
+        assert store.save_rotation(new, planned) is False
+        got = store.get(old.key_id)
+        assert got.revoked_at == T0 + timedelta(minutes=5) and got.revoke_reason == "compromised"
+        assert got.rotated_to is None and got.expires_at == old.expires_at   # untouched
+        assert store.get(new.key_id) is None                                  # nothing written
+        missing = make_record("GONEGONEGONE").replace(rotated_to=new.key_id)
+        assert store.save_rotation(new, missing) is False
+        assert store.get(new.key_id) is None
 
     # -- optional ops ------------------------------------------------------------
     def _seed(self, store):

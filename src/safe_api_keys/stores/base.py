@@ -12,7 +12,7 @@ from .._util import UTC, from_iso, to_iso
 from ..models import KeyRecord
 
 __all__ = ["KeyStore", "AsyncKeyStore", "AsyncStoreAdapter", "record_to_row", "row_to_record", "COLUMNS",
-           "is_active_at"]
+           "ROTATION_FIELDS", "rotation_fields", "is_active_at"]
 
 COLUMNS = (
     "key_id", "prefix", "hash", "hash_alg", "secret_last4", "owner", "name", "scopes", "created_at",
@@ -21,10 +21,21 @@ COLUMNS = (
 )
 _DT_FIELDS = ("created_at", "expires_at", "revoked_at", "last_used_at")
 _JSON_FIELDS = ("scopes", "ip_allowlist", "metadata")
+#: The only columns ``save_rotation`` writes on the *old* key (a partial update, like ``touch``).
+ROTATION_FIELDS = ("rotated_to", "expires_at", "revoked_at", "revoke_reason")
 
 
 @runtime_checkable
 class KeyStore(Protocol):
+    """Required: ``get``/``save``/``touch``. Optional: ``list``, ``delete``, ``purge``, ``count_by_hash_alg``,
+    ``save_many`` and ``save_rotation``.
+
+    ``save_rotation(new, old) -> bool`` is what makes :meth:`KeyManager.rotate` safe against a concurrent
+    ``revoke``: in one atomic step it must (1) refuse (return ``False`` and write nothing) when the stored
+    ``old`` key already has ``revoked_at`` set, otherwise (2) apply only :data:`ROTATION_FIELDS` of ``old``
+    as a partial update and (3) save ``new``. Every built-in store implements it.
+    """
+
     def get(self, key_id: str) -> Optional[KeyRecord]: ...
 
     def save(self, record: KeyRecord) -> None: ...
@@ -43,6 +54,11 @@ class AsyncKeyStore(Protocol):
 
 def is_active_at(record: KeyRecord, now: Optional[datetime]) -> bool:
     return record.is_active(now)
+
+
+def rotation_fields(old: KeyRecord) -> Dict[str, Any]:
+    """The partial update ``save_rotation`` applies to the old key (values as :class:`KeyRecord` attributes)."""
+    return {name: getattr(old, name) for name in ROTATION_FIELDS}
 
 
 def record_to_row(record: KeyRecord, *, native_datetime: bool = False, native_json: bool = False) -> Dict[str, Any]:
@@ -110,7 +126,7 @@ class AsyncStoreAdapter:
 
             threaded = not isinstance(store, MemoryStore)
         self._threaded = threaded
-        for name in ("list", "delete", "purge", "count_by_hash_alg", "close", "save_many"):
+        for name in ("list", "delete", "purge", "count_by_hash_alg", "close", "save_many", "save_rotation"):
             if callable(getattr(store, name, None)):
                 setattr(self, name, functools.partial(self._run, name))
 

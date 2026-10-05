@@ -122,12 +122,14 @@ class APIKeys(AdapterBase):
         exempt_paths = tuple(e for e in exempt if e.startswith("/"))
         exempt_endpoints = {e for e in exempt if not e.startswith("/")}
 
-        def guard() -> None:
-            if request.method == "OPTIONS":
-                return None
+        def guard() -> Any:
             if request.endpoint in exempt_endpoints or path_matches(request.path, exempt_paths):
                 return None
-            self.authenticate(scopes, any_scopes)
+            if request.method == "OPTIONS" and "Access-Control-Request-Method" in request.headers:
+                # CORS preflight: browsers send it without credentials, so it cannot carry a key. Answer it
+                # with Flask's standard OPTIONS response (Flask-CORS decorates it) *without* running the view.
+                return current_app.make_default_options_response()
+            self.authenticate(scopes, any_scopes)  # every other method, plain OPTIONS included
             return None
 
         bp.before_request(guard)

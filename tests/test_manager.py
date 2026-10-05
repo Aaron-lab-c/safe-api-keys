@@ -6,6 +6,7 @@ from unittest import mock
 import pytest
 
 from safe_api_keys import (
+    AlreadyRotated,
     ExpiredKey,
     InsufficientScope,
     IPNotAllowed,
@@ -20,6 +21,7 @@ from safe_api_keys import (
 from safe_api_keys.audit import CallbackAuditSink
 from safe_api_keys.exceptions import INVALID_API_KEY_MESSAGE
 from safe_api_keys.hashing import HmacSha256Hasher
+from safe_api_keys.policy import KeyPolicy
 from safe_api_keys.stores import MemoryStore
 
 from .conftest import PEPPER, START, make_km
@@ -220,6 +222,92 @@ def test_rotate_keeps_earlier_expiry_and_zero_grace(anykm):
         anykm.rotate("NOSUCHKEY123")
 
 
+def test_rotate_inherits_lifetime_by_default(anykm, clock):
+    """The new key gets the old key's lifetime counted from now, unless told otherwise."""
+    a = anykm.issue("o", expires_in=timedelta(days=30))
+    clock.advance(days=20)
+    na = anykm.rotate(a.key_id)
+    assert na.record.expires_at == START + timedelta(days=50)        # 30 days from the rotation, not 10
+    nb = anykm.rotate(na.key_id, expires_in=timedelta(days=90))      # explicit lifetime still wins
+    assert nb.record.expires_at == START + timedelta(days=110)
+    perpetual = anykm.issue("o")
+    assert anykm.rotate(perpetual.key_id).record.expires_at is None  # no expiry -> policy default (none here)
+
+
+def test_rotate_inherited_lifetime_capped_by_policy(clock):
+    km = make_km(clock=clock, policy=KeyPolicy(max_ttl=timedelta(days=365)))
+    a = km.issue("o", expires_in=timedelta(days=300))
+    km.policy = KeyPolicy(max_ttl=timedelta(days=30))                 # policy tightened after issuance
+    assert km.rotate(a.key_id).record.expires_at == START + timedelta(days=30)
+
+
+def test_rotate_refuses_expired_key(anykm, clock):
+    a = anykm.issue("o", expires_in=timedelta(hours=1))
+    clock.advance(hours=1)
+    with pytest.raises(ExpiredKey):
+        anykm.rotate(a.key_id)
+    assert anykm.get(a.key_id).rotated_to is None
+    assert anykm.list("o", include_inactive=True) == [anykm.get(a.key_id)]  # no replacement was written
+
+
+def test_rotate_refuses_already_rotated_key(anykm):
+    a = anykm.issue("o", expires_in=timedelta(days=90))
+    b = anykm.rotate(a.key_id, grace=timedelta(hours=24))
+    with pytest.raises(AlreadyRotated) as ei:                      # still valid in its grace period, but...
+        anykm.rotate(a.key_id)
+    assert ei.value.key_id == a.key_id and ei.value.rotated_to == b.key_id
+    assert anykm.get(a.key_id).rotated_to == b.key_id               # lineage intact, no orphan key
+    assert len(anykm.list("o", include_inactive=True)) == 2
+    anykm.rotate(b.key_id)                                           # the replacement rotates normally
+
+
+def test_rotate_loses_to_concurrent_revoke(clock):
+    """revoke() between rotate()'s read and its write must win: the old key stays revoked, no new key."""
+    store = MemoryStore()
+    km = make_km(store, clock=clock)
+    old = km.issue("o")
+    real_get = store.get
+
+    def get_then_revoke_elsewhere(key_id):
+        rec = real_get(key_id)
+        if rec is not None and rec.key_id == old.key_id and rec.revoked_at is None:
+            store.save(rec.replace(revoked_at=clock(), revoke_reason="compromised"))  # another process
+        return rec
+
+    store.get = get_then_revoke_elsewhere
+    with pytest.raises(RevokedKey):
+        km.rotate(old.key_id)
+    after = real_get(old.key_id)
+    assert after.revoked_at is not None and after.revoke_reason == "compromised" and after.rotated_to is None
+    assert len(store.list(include_inactive=True)) == 1
+
+
+def test_rotate_loses_to_concurrent_revoke_without_save_rotation(clock):
+    """Stores without save_rotation() get a best-effort re-check right before the write."""
+
+    class Plain(MemoryStore):
+        save_many = save_rotation = None
+
+    store = Plain()
+    km = make_km(store, clock=clock)
+    old = km.issue("o")
+    real_get = store.get
+    calls = []
+
+    def racy_get(key_id):
+        rec = real_get(key_id)
+        if rec is not None and rec.key_id == old.key_id:
+            calls.append(key_id)
+            if len(calls) == 1:  # revoked after rotate() read it, before it re-checks
+                store.save(rec.replace(revoked_at=clock(), revoke_reason="compromised"))
+        return rec
+
+    store.get = racy_get
+    with pytest.raises(RevokedKey):
+        km.rotate(old.key_id)
+    assert real_get(old.key_id).revoked_at is not None and len(store.list(include_inactive=True)) == 1
+
+
 def test_lineage(anykm):
     a = anykm.issue("o")
     b = anykm.rotate(a.key_id)
@@ -329,7 +417,7 @@ def test_rotate_partial_failure(clock):
     events = []
 
     class FailSecondSave(MemoryStore):
-        save_many = None  # force the non-transactional path
+        save_many = save_rotation = None  # force the non-transactional path
 
         def save(self, record):
             if record.rotated_to:

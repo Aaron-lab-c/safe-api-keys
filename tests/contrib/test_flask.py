@@ -89,6 +89,17 @@ def test_blueprint_protection(env):
     assert km.get(j.key_id).use_count == 1  # blueprint verified; decorator only re-checked scopes
 
 
+def test_blueprint_options_requires_key(env):
+    """OPTIONS is authenticated like any other method; only a CORS preflight is answered without the view."""
+    km, client, _ = env
+    assert client.options("/api/me").status_code == 401
+    r = client.options("/api/me", headers={"Origin": "https://app.example", "Access-Control-Request-Method": "GET"})
+    assert r.status_code == 200 and "GET" in r.headers["Allow"] and not r.data.strip()  # no view body
+    i = km.issue("u1")
+    assert client.options("/api/me", headers={"Authorization": f"Bearer {i.raw_key}"}).status_code == 200
+    assert client.options("/api/health").status_code == 200
+
+
 def test_revoke_rotate_sunset(env, clock):
     km, c, _ = env
     i = km.issue("u1")

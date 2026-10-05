@@ -23,7 +23,11 @@ repository rather than in public issues. We aim to acknowledge within 3 business
 | Key leakage through logs/UI | `masked` everywhere; reprs/exceptions/audit events/CLI/admin never print secrets (enforced by tests scanning for 32-char base62 runs). Query-string extraction is off by default. |
 | Leaked key | `revoke()` is immediate (≤ `VerifyCache.ttl` across processes when the optional cache is enabled); rotation with grace period; audit trail (`key.rejected` with reasons, `rotated_to` usage). |
 | IP spoofing via `X-Forwarded-For` | Ignored unless `trust_proxy`/`trusted_proxies` is configured; the resolver walks the chain from the right and never trusts client-supplied left-most entries. |
-| Lost revocations under concurrency | `touch` is a partial update and cannot overwrite `revoked_at`. |
+| Lost revocations under concurrency | `touch` is a partial update and cannot overwrite `revoked_at`; `rotate` writes the old key with an atomic, conditional partial update (`save_rotation`) that refuses once `revoked_at` is set, so a concurrent `revoke` always wins and no replacement key is written. |
+| Rotation resurrecting a dead key | Revoked, expired and already rotated keys cannot be rotated; the replacement gets the old key's lifetime counted from the rotation (capped at `max_ttl`), so a time-limited key never becomes perpetual. |
+| Unauthenticated access through `OPTIONS` | The Django middleware and the Flask blueprint guard authenticate every method; only a CORS preflight (no credentials by design) is answered by Flask's default `OPTIONS` response without running the view. Put CORS middleware above `APIKeyMiddleware` in Django. |
+| Raw key exposure on the operator's side | The Django admin renders a new key straight into the result page, never into the `messages` cookie; admin rows cannot be deleted (revoke keeps the audit trail); `safe-api-keys verify`/`parse` read the key from stdin instead of the command line (`ps`, shell history). |
+| Deploying without a pepper | `python manage.py check` reports `safe_api_keys.W001` (missing) / `E001` (invalid); non-Django code fails at construction (`ConfigurationError`). |
 | Pepper compromise / rotation | Versioned `hash_alg` (`hmac-sha256$v2`), multiple peppers, `count_by_hash_alg()` to know when an old pepper can be dropped. |
 
 ### Out of scope

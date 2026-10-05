@@ -6,7 +6,7 @@ from flask import Blueprint, Flask, abort, g, jsonify, request, session
 from sqlalchemy import MetaData, create_engine
 from sqlalchemy.orm import sessionmaker
 
-from safe_api_keys import KeyManager, KeyPolicy
+from safe_api_keys import AlreadyRotated, ExpiredKey, KeyManager, KeyPolicy, RevokedKey
 from safe_api_keys.contrib.flask import APIKeys
 from safe_api_keys.stores import SQLAlchemyStore, make_api_key_table
 
@@ -139,7 +139,10 @@ def create_app(km=None):
     @app.post("/account/api-keys/<key_id>/rotate")
     def rotate_key(key_id):
         _own_key_or_404(key_id)
-        issued = km.rotate(key_id, grace=timedelta(hours=24))   # 舊 key 24 小時後失效
+        try:
+            issued = km.rotate(key_id, grace=timedelta(hours=24))   # 舊 key 24 小時後失效
+        except (RevokedKey, ExpiredKey, AlreadyRotated) as exc:    # 已撤銷／已過期／已輪替過：狀態衝突
+            return jsonify(error="conflict", message=str(exc)), 409
         return jsonify(api_key=issued.raw_key, key_id=issued.record.key_id, masked=issued.record.masked), 201
 
     # ---- 3. 受 API key 保護的對外 API -------------------------------------------------

@@ -82,9 +82,14 @@ def test_self_service_lifecycle(client, clock):
     assert client.get("/api/orders", headers=bearer(raw)).json["error"] == "expired_api_key"
     assert client.get("/api/orders", headers=bearer(new_raw)).status_code == 200
 
+    # rotating a key that already has a replacement (or is expired / revoked) is a 409
+    r2 = client.post(f"/account/api-keys/{key_id}/rotate", json={})
+    assert r2.status_code == 409 and r2.json["error"] == "conflict"
+
     # 5) revoke -> 401
     new_id = r.json["key_id"]
     assert client.delete(f"/account/api-keys/{new_id}", json={}).status_code == 204
+    assert client.post(f"/account/api-keys/{new_id}/rotate", json={}).status_code == 409
     r = client.get("/api/orders", headers=bearer(new_raw))
     assert r.status_code == 401 and r.json["error"] == "revoked_api_key"
     assert r.headers["WWW-Authenticate"].startswith("Bearer")

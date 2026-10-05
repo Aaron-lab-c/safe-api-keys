@@ -18,10 +18,10 @@ def run(tmp_path):
     env = {**os.environ, "SAFE_API_KEYS_PEPPER": PEPPER, "SAFE_API_KEYS_STORE": f"sqlite:///{db}"}
     env.pop("SAFE_API_KEYS_PEPPERS", None)
 
-    def _run(*args, env_over=None, check_clean=True):
+    def _run(*args, env_over=None, check_clean=True, stdin=None):
         e = {**env, **(env_over or {})}
         p = subprocess.run([sys.executable, "-m", "safe_api_keys.cli", *args], capture_output=True, env=e,
-                           timeout=60)
+                           timeout=60, input=stdin.encode() if stdin is not None else None)
         out, err = p.stdout.decode("utf-8"), p.stderr.decode("utf-8")
         assert "\r\n" not in out  # LF on non-tty
         if check_clean:
@@ -66,6 +66,22 @@ def test_full_lifecycle(run):
     assert {r["state"] for r in json.loads(out)} == {"revoked", "active"}
     rc, out, _ = run("purge", "--older-than", "90d")
     assert rc == 0 and "purged 0" in out
+
+
+def test_verify_and_parse_read_key_from_stdin(run):
+    """The raw key never has to be on the command line (where `ps` and the shell history would see it)."""
+    rc, out, _ = run("issue", "--prefix", "sk_cli", "--owner", "svc", "--scopes", "orders:read", check_clean=False)
+    raw = out.strip()
+    rc, out, _ = run("verify", "--prefix", "sk_cli", stdin=raw + "\n")
+    assert rc == 0 and out.startswith("valid:") and "owner=svc" in out
+    rc, out, _ = run("verify", "--prefix", "sk_cli", "-", "--scopes", "orders:read", "--json", stdin=raw)
+    assert rc == 0 and json.loads(out)["ok"] is True
+    rc, out, _ = run("parse", stdin=raw + "\n", env_over={"SAFE_API_KEYS_STORE": "", "SAFE_API_KEYS_PEPPER": ""})
+    assert rc == 0 and "checksum_ok: True" in out
+    rc, _, err = run("verify", "--prefix", "sk_cli", stdin="")
+    assert rc == 2 and "stdin" in err
+    rc, _, _ = run("verify", "--prefix", "sk_cli", stdin="not-a-key\n")
+    assert rc == 1
 
 
 def test_issue_json_contains_raw_key(run):
