@@ -6,13 +6,14 @@ import asyncio
 import functools
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
-from .._util import UTC, from_iso, to_iso
+from .._util import UTC, from_iso, to_iso, utcnow
 from ..models import KeyRecord
 
 __all__ = ["KeyStore", "AsyncKeyStore", "AsyncStoreAdapter", "record_to_row", "row_to_record", "COLUMNS",
-           "ROTATION_FIELDS", "UPDATABLE_FIELDS", "rotation_fields", "fields_to_row", "is_active_at"]
+           "ROTATION_FIELDS", "UPDATABLE_FIELDS", "rotation_fields", "fields_to_row", "is_active_at",
+           "is_rotatable", "is_updatable", "now_from", "Clock"]
 
 COLUMNS = (
     "key_id", "prefix", "hash", "hash_alg", "secret_last4", "owner", "name", "scopes", "created_at",
@@ -37,10 +38,15 @@ class KeyStore(Protocol):
     ``old`` key already has ``revoked_at`` set, otherwise (2) apply only :data:`ROTATION_FIELDS` of ``old``
     as a partial update and (3) save ``new``. Every built-in store implements it.
 
-    ``update_fields(key_id, fields) -> bool`` backs :meth:`KeyManager.update` the same way: a partial update
-    of a subset of :data:`UPDATABLE_FIELDS` (values as :class:`KeyRecord` attributes) that is applied only
-    while ``revoked_at`` is still unset, returning ``False`` (nothing written) otherwise or when the key is
-    missing. Every built-in store implements it.
+    The condition is "still live and not yet rotated": ``revoked_at IS NULL AND rotated_to IS NULL``, so two
+    concurrent rotations cannot both succeed and a revocation always wins.
+
+    ``update_fields(key_id, fields, *, clock) -> bool`` backs :meth:`KeyManager.update` the same way: a partial
+    update of a subset of :data:`UPDATABLE_FIELDS` (values as :class:`KeyRecord` attributes) applied only
+    while the key is live (:func:`is_updatable`: not revoked, not rotated, not expired), returning ``False``
+    (nothing written) otherwise or when the key is missing. ``clock`` is the manager's zero-argument clock:
+    call it *immediately before* evaluating the condition, so a key that expires while the request is in
+    flight is not revived. Every built-in store implements it.
     """
 
     def get(self, key_id: str) -> Optional[KeyRecord]: ...
@@ -61,6 +67,24 @@ class AsyncKeyStore(Protocol):
 
 def is_active_at(record: KeyRecord, now: Optional[datetime]) -> bool:
     return record.is_active(now)
+
+
+Clock = Callable[[], datetime]
+
+
+def now_from(clock: Optional[Clock]) -> datetime:
+    """The write-time ``now`` of a conditional update: the caller's clock, else the wall clock."""
+    return clock() if clock is not None else utcnow()
+
+
+def is_rotatable(record: Optional[KeyRecord]) -> bool:
+    """Write condition of ``save_rotation``: the stored key is neither revoked nor already rotated."""
+    return record is not None and record.revoked_at is None and not record.rotated_to
+
+
+def is_updatable(record: Optional[KeyRecord], now: datetime) -> bool:
+    """Write condition of ``update_fields``: rotatable *and* not expired at ``now``."""
+    return is_rotatable(record) and (record.expires_at is None or record.expires_at > now)  # type: ignore[union-attr]
 
 
 def rotation_fields(old: KeyRecord) -> Dict[str, Any]:

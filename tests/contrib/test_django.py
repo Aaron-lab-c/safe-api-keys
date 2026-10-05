@@ -120,6 +120,26 @@ def test_request_user_from_resolver(client, django_user_model):
         assert r["owner"] == "nobody" and r["authenticated"] is False
 
 
+def test_api_key_identity_replaces_session_user(client, django_user_model):
+    """C: a request authenticated by a key never keeps the session user as a second identity."""
+    import django
+
+    km = get_manager()
+    alice = django_user_model.objects.create(username="alice")
+    django_user_model.objects.create(username="bob")
+    client.force_login(alice)
+    bob_key = km.issue("bob")
+    nobody_key = km.issue("nobody")
+    assert client.get("/whoami/", **bearer(bob_key.raw_key)).json()["user"] == "bob"
+    r = client.get("/whoami/", **bearer(nobody_key.raw_key)).json()
+    assert r["user"] == "AnonymousUser" and r["authenticated"] is False   # not alice
+    if django.VERSION >= (5, 0):
+        assert client.get("/async-whoami/", **bearer(bob_key.raw_key)).json() == {"request_user": "bob",
+                                                                                   "auser": "bob"}
+        r = client.get("/async-whoami/", **bearer(nobody_key.raw_key)).json()
+        assert r == {"request_user": "AnonymousUser", "auser": "AnonymousUser"}
+
+
 def test_request_user_untouched_without_resolver(client, settings, django_user_model):
     settings.SAFE_API_KEYS = {**settings.SAFE_API_KEYS, "USER_RESOLVER": None}
     km = get_manager()
@@ -144,6 +164,12 @@ def test_system_check_warns_without_pepper(settings, monkeypatch):
     monkeypatch.setenv("SAFE_API_KEYS_PEPPERS", "garbage-without-version")
     found = check_pepper()
     assert [m.id for m in found] == [E001] and isinstance(found[0], checks.Error)
+    monkeypatch.delenv("SAFE_API_KEYS_PEPPERS")
+    monkeypatch.setenv("SAFE_API_KEYS_PEPPER", "short123")                   # E: too short must be E001 too
+    found = check_pepper()
+    assert [m.id for m in found] == [E001] and "16" in found[0].hint
+    monkeypatch.setenv("SAFE_API_KEYS_PEPPER", "x" * 40)
+    assert check_pepper() == []
 
 
 def test_drf(client, django_user_model):
@@ -240,6 +266,48 @@ def test_management_command():
     out = StringIO()
     call_command("apikey", "purge", "--older-than", "90d", stdout=out)
     assert "purged 0" in out.getvalue()
+
+
+def _staff(django_user_model, name, *codenames):
+    from django.contrib.auth.models import Permission
+
+    user = django_user_model.objects.create_user(name, password="pw-for-tests-only", is_staff=True)
+    for codename in codenames:
+        user.user_permissions.add(Permission.objects.get(codename=codename))
+    return user
+
+
+def test_admin_actions_require_permissions(client, django_user_model):
+    """A: view-only staff can neither rotate (which hands out a key) nor revoke anyone's keys."""
+    km = get_manager()
+    victim = km.issue("service-a", scopes=["*"])
+    rotate = {"action": "rotate_selected", "_selected_action": [victim.key_id]}
+    revoke = {"action": "revoke_selected", "_selected_action": [victim.key_id]}
+
+    client.force_login(_staff(django_user_model, "viewer", "view_apikey"))
+    page = client.get("/admin/safe_api_keys/apikey/").content.decode()
+    assert "rotate_selected" not in page and "revoke_selected" not in page
+    r = client.post("/admin/safe_api_keys/apikey/", rotate, follow=True)
+    assert r.status_code == 200 and not SECRET_RE.search(scrub(r.content.decode()))
+    assert APIKey.objects.get(pk=victim.key_id).rotated_to is None and APIKey.objects.count() == 1
+    client.post("/admin/safe_api_keys/apikey/", revoke, follow=True)
+    assert APIKey.objects.get(pk=victim.key_id).revoked_at is None
+
+    client.force_login(_staff(django_user_model, "editor", "view_apikey", "change_apikey"))
+    page = client.get("/admin/safe_api_keys/apikey/").content.decode()
+    assert "revoke_selected" in page and "rotate_selected" not in page
+    r = client.post("/admin/safe_api_keys/apikey/", rotate, follow=True)
+    assert not SECRET_RE.search(scrub(r.content.decode())) and APIKey.objects.count() == 1  # change != rotate
+
+    client.force_login(_staff(django_user_model, "rotator", "view_apikey", "rotate_apikey"))
+    assert "rotate_selected" in client.get("/admin/safe_api_keys/apikey/").content.decode()
+    r = client.post("/admin/safe_api_keys/apikey/", rotate, follow=True)
+    shown = re.search(r"sk_test_[0-9A-Za-z]{12}_[0-9A-Za-z]{38}", r.content.decode())
+    assert shown and km.verify(shown.group(0)).rotated_from == victim.key_id
+
+    client.force_login(_staff(django_user_model, "editor2", "view_apikey", "change_apikey"))
+    client.post("/admin/safe_api_keys/apikey/", revoke, follow=True)
+    assert APIKey.objects.get(pk=victim.key_id).revoked_at is not None
 
 
 @pytest.fixture

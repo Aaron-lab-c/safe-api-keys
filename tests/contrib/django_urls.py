@@ -43,6 +43,12 @@ def whoami(request):
                          "authenticated": request.user.is_authenticated})
 
 
+@require_api_key
+async def async_whoami(request):
+    au = await request.auser()
+    return JsonResponse({"request_user": str(request.user), "auser": str(au)})
+
+
 def mw_health(request):
     return JsonResponse({"ok": True, "has_key": hasattr(request, "api_key")})
 
@@ -90,6 +96,7 @@ urlpatterns = [
     path("mw/health/", mw_health),
     path("mw/whoami/", whoami),
     path("whoami/", require_api_key(whoami)),
+    path("async-whoami/", async_whoami),
     path("drf/orders/", DRFOrders.as_view()),
     path("drf/any/", DRFAny.as_view()),
     path("drf/plain/", DRFPlain.as_view()),

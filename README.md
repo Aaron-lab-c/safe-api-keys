@@ -718,6 +718,11 @@ python manage.py apikey revoke <key_id> --reason compromised
 straight into that response, never put into a `messages` cookie). The admin can revoke and rotate but not
 delete: a deleted row leaves no audit trail, so clean up with `purge` instead.
 
+Admin permissions: adding needs `safe_api_keys.add_apikey`, revoking needs `safe_api_keys.change_apikey`, and
+rotating needs the dedicated `safe_api_keys.rotate_apikey` permission (migration `0002`), because it hands out
+a working key for someone else's account. Staff with only `view_apikey` see the list and nothing else. Grant
+`rotate_apikey` deliberately: it is not part of `change`.
+
 `APIKeyMiddleware` authenticates **every** method on `PROTECT` paths, `OPTIONS` included, so a view behind it
 never runs without a valid key. CORS preflights carry no credentials, so with the default
 `"CORS_PREFLIGHT": "authenticate"` answer them *before* this middleware (put
@@ -726,9 +731,10 @@ layer only adds headers in the response phase, set `"CORS_PREFLIGHT": "respond"`
 (`OPTIONS` with both `Origin` and `Access-Control-Request-Method`) then gets an empty 204 from the middleware
 itself, without a key and without running the view; any other `OPTIONS` still needs a key.
 
-With `USER_RESOLVER` set, the middleware and `@require_api_key` also put the resolved user into
-`request.user` (DRF already did), so plain views can use `request.user` the same way; when the resolver finds
-nobody, `request.user` is left as the auth middleware set it. Keep `APIKeyMiddleware` *below*
+With `USER_RESOLVER` set, the middleware and `@require_api_key` make the key's owner the request's identity:
+`request.user` **and** `request.auser()` (Django 5 async views) return the resolved user, or `AnonymousUser`
+when the resolver finds nobody, so a request authenticated by an API key never keeps a session cookie's user
+as a second identity. Without a resolver nothing is touched. Keep `APIKeyMiddleware` *below*
 `AuthenticationMiddleware`, as in the settings above.
 
 `python manage.py check` (also run by `runserver`) reports `safe_api_keys.W001` when no pepper is configured
@@ -1122,12 +1128,12 @@ Everything `rotate()` can raise, in one place:
 | `PolicyViolation`, `ValueError` | bad `grace`/`expires_*` or a policy limit |
 | `StoreError` | backend failure |
 
-A
-`revoke()` that lands while a `rotate()` is in flight wins: the built-in stores apply the rotation
-as one atomic, conditional write (`save_rotation`), so the old key stays revoked, no replacement is written and
-`rotate()` raises `RevokedKey`. A custom store gets the same guarantee by implementing
-`save_rotation(new, old) -> bool` (see `safe_api_keys.stores.base.KeyStore`); without it the manager re-checks
-right before writing, which narrows the window but cannot close it.
+A `revoke()` or another `rotate()` that lands while a `rotate()` is in flight wins: the built-in stores apply
+the rotation as one atomic, conditional write (`save_rotation`, condition `revoked_at IS NULL AND rotated_to
+IS NULL`), so the old key stays revoked, two racing rotations yield exactly one replacement, and the losing
+call raises `RevokedKey`/`AlreadyRotated` according to the key's actual state. A custom store gets the same
+guarantee by implementing `save_rotation(new, old) -> bool` (see `safe_api_keys.stores.base.KeyStore`);
+without it the manager re-checks right before writing, which narrows the window but cannot close it.
 
 **Changing a key in place** — scopes, expiry, IP allow-list, name and metadata can be updated without
 reissuing (`None` = unchanged); the same policy checks as `issue()` apply and a `key.updated` audit event
@@ -1137,10 +1143,12 @@ records which fields changed:
 km.update(key_id, scopes=["orders:*"], expires_in=timedelta(days=90), ip_allowlist=["10.0.0.0/8"])
 ```
 
-Only a live key can be updated (`RevokedKey`/`ExpiredKey` otherwise: an expired key is not revived by moving
-its expiry; rotate or issue instead), the expiry can be moved but not removed, and the write is a partial,
-conditional one on every built-in store (`update_fields`), so it never clobbers a concurrent `revoke()` or
-usage counters. The async manager has the same method.
+Only a live, not-yet-rotated key can be updated (`RevokedKey`/`ExpiredKey`/`AlreadyRotated` otherwise: an
+expired key is not revived by moving its expiry and a key in its grace period cannot be extended; rotate or
+issue instead), the expiry can be moved but not removed, and the write is a partial, conditional one on every
+built-in store (`update_fields(key_id, fields, *, clock)`, condition evaluated at write time with the
+manager's clock), so it never clobbers a concurrent `revoke()`/`rotate()`, an expiry that passed while the
+request was in flight, or usage counters. The async manager has the same method.
 
 **Pepper rotation** — add a new version, keep the old one for verification:
 

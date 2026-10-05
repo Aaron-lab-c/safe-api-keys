@@ -19,7 +19,18 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 from .._util import to_iso
 from ..exceptions import MissingDependency, StoreError
 from ..models import KeyRecord
-from .base import COLUMNS, ROTATION_FIELDS, UPDATABLE_FIELDS, filter_records, record_to_row, row_to_record
+from .base import (
+    COLUMNS,
+    ROTATION_FIELDS,
+    UPDATABLE_FIELDS,
+    Clock,
+    filter_records,
+    is_rotatable,
+    is_updatable,
+    now_from,
+    record_to_row,
+    row_to_record,
+)
 
 try:
     from redis.exceptions import RedisError, WatchError
@@ -175,7 +186,7 @@ class RedisStore:
             except WatchError:  # someone wrote the key meanwhile: it is a real record now
                 pass
 
-    def update_fields(self, key_id: str, fields: Mapping[str, Any]) -> bool:
+    def update_fields(self, key_id: str, fields: Mapping[str, Any], *, clock: Optional[Clock] = None) -> bool:
         _check_updatable(fields)
         k = self._k.key(key_id)
         try:
@@ -184,7 +195,7 @@ class RedisStore:
                     try:
                         pipe.watch(k)
                         current = _decode(pipe.hgetall(k))
-                        if current is None or current.revoked_at is not None:
+                        if not is_updatable(current, now_from(clock)):  # clock read under WATCH
                             pipe.unwatch()
                             return False
                         pipe.multi()
@@ -207,7 +218,7 @@ class RedisStore:
                     try:
                         pipe.watch(k)
                         current = _decode(pipe.hgetall(k))
-                        if current is None or current.revoked_at is not None:
+                        if not is_rotatable(current):
                             pipe.unwatch()
                             return False
                         pipe.multi()
@@ -328,7 +339,8 @@ class AsyncRedisStore:
             except WatchError:
                 pass
 
-    async def update_fields(self, key_id: str, fields: Mapping[str, Any]) -> bool:
+    async def update_fields(self, key_id: str, fields: Mapping[str, Any], *,
+                            clock: Optional[Clock] = None) -> bool:
         _check_updatable(fields)
         k = self._k.key(key_id)
         try:
@@ -337,7 +349,7 @@ class AsyncRedisStore:
                     try:
                         await pipe.watch(k)
                         current = _decode(await pipe.hgetall(k))
-                        if current is None or current.revoked_at is not None:
+                        if not is_updatable(current, now_from(clock)):
                             await pipe.unwatch()
                             return False
                         pipe.multi()
@@ -358,7 +370,7 @@ class AsyncRedisStore:
                     try:
                         await pipe.watch(k)
                         current = _decode(await pipe.hgetall(k))
-                        if current is None or current.revoked_at is not None:
+                        if not is_rotatable(current):
                             await pipe.unwatch()
                             return False
                         pipe.multi()

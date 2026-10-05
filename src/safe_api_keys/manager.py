@@ -24,7 +24,7 @@ from ._logic import (
 from ._util import to_iso
 from .audit import AuditSink
 from .cache import VerifyCache
-from .exceptions import APIKeyError, RevokedKey, StoreError, UnknownKey
+from .exceptions import APIKeyError, SafeAPIKeysError, StoreError, UnknownKey
 from .format import KeyFormat
 from .hashing import Hasher
 from .models import IssuedKey, KeyRecord, ParsedKey, VerifyResult
@@ -239,15 +239,13 @@ class KeyManager(KeyVerifier):
 
     def _save_rotation(self, new: KeyRecord, old: KeyRecord) -> None:
         save_rotation = getattr(self.store, "save_rotation", None)
-        if callable(save_rotation):  # atomic + conditional: a concurrent revoke wins and nothing is written
+        if callable(save_rotation):  # atomic + conditional: a concurrent revoke/rotate wins, nothing is written
             if not self._call(save_rotation, new, old):
-                raise self._rotation_refused(old.key_id)
+                raise self._refused(old.key_id)
             return
         # Stores without save_rotation: re-check right before writing. A small window remains; implement
         # save_rotation (see stores.base.KeyStore) to close it.
-        current = self.get(old.key_id)
-        if current is None or current.revoked_at is not None:
-            raise self._rotation_refused(old.key_id)
+        self._recheck(old.key_id)
         save_many = getattr(self.store, "save_many", None)
         if callable(save_many):  # transactional backends: both or neither
             self._call(save_many, [new, old])
@@ -260,10 +258,21 @@ class KeyManager(KeyVerifier):
                         extra={"rotated_to": new.key_id})
             raise
 
-    def _rotation_refused(self, key_id: str) -> APIKeyError:
-        if self.get(key_id) is None:
-            return UnknownKey(reason="unknown", key_id=key_id)
-        return RevokedKey(key_id=key_id)
+    def _recheck(self, key_id: str) -> KeyRecord:
+        """Fallback for stores without conditional writes: re-read and re-validate right before writing."""
+        current = self.get(key_id)
+        if current is None:
+            raise UnknownKey(reason="unknown", key_id=key_id)
+        check_rotatable(current, self.now())
+        return current
+
+    def _refused(self, key_id: str) -> SafeAPIKeysError:
+        """A conditional write was refused: report the key's actual state (revoked / expired / rotated)."""
+        try:
+            self._recheck(key_id)
+        except APIKeyError as exc:
+            return exc
+        return StoreError(f"conditional write for key_id={key_id} was refused but the key looks live")
 
     # -- update -------------------------------------------------------------------
     def update(self, key_id_or_raw: str, *, name: Optional[str] = None, scopes: Optional[Iterable[str]] = None,
@@ -272,9 +281,9 @@ class KeyManager(KeyVerifier):
                metadata: Optional[Mapping[str, Any]] = None) -> KeyRecord:
         """Change a live key in place (``None`` = unchanged) under the same policy checks as :meth:`issue`.
 
-        Emits ``key.updated``. Revoked or expired keys raise ``RevokedKey``/``ExpiredKey`` (issue or rotate
-        instead); a key revoked while the update is in flight stays revoked (``RevokedKey``, nothing written).
-        The expiry can be moved but not removed.
+        Emits ``key.updated``. Revoked, expired or already rotated keys raise ``RevokedKey``/``ExpiredKey``/
+        ``AlreadyRotated`` (issue or rotate instead); a key revoked, rotated or expired while the update is in
+        flight is left alone and the same exception is raised. The expiry can be moved but not removed.
         """
         key_id = key_id_from(key_id_or_raw, self.key_format)
         record = self.get(key_id)
@@ -286,14 +295,11 @@ class KeyManager(KeyVerifier):
         if not changes:
             return record
         update_fields = getattr(self.store, "update_fields", None)
-        if callable(update_fields):  # partial + conditional: never un-revokes, never clobbers touch()
-            if not self._call(update_fields, key_id, changes):
-                raise self._rotation_refused(key_id)
+        if callable(update_fields):  # partial + conditional on "live and not rotated at now"
+            if not self._call(update_fields, key_id, changes, clock=self.now):
+                raise self._refused(key_id)
         else:  # best effort for stores without update_fields
-            current = self.get(key_id)
-            if current is None or current.revoked_at is not None:
-                raise self._rotation_refused(key_id)
-            self._call(self.store.save, current.replace(**changes))
+            self._call(self.store.save, self._recheck(key_id).replace(**changes))
         self._invalidate(key_id)
         updated = record.replace(**changes)
         self._event("key.updated", at=now, key_id=key_id, owner=record.owner, extra=_update_extra(changes))
