@@ -14,7 +14,7 @@ from typing import Any, Callable, Optional, Sequence, TypeVar, cast
 
 from ..exceptions import APIKeyError, MissingDependency, MissingKey, StoreError
 from ..extract import ExtractConfig, extract_key
-from ..http import ErrorFormatter, path_matches, sunset_headers
+from ..http import ErrorFormatter, is_cors_preflight, path_matches, sunset_headers
 from ..models import KeyRecord
 from ._common import AdapterBase, OnRejected
 
@@ -125,7 +125,7 @@ class APIKeys(AdapterBase):
         def guard() -> Any:
             if request.endpoint in exempt_endpoints or path_matches(request.path, exempt_paths):
                 return None
-            if request.method == "OPTIONS" and "Access-Control-Request-Method" in request.headers:
+            if is_cors_preflight(request.method, request.headers):
                 # CORS preflight: browsers send it without credentials, so it cannot carry a key. Answer it
                 # with Flask's standard OPTIONS response (Flask-CORS decorates it) *without* running the view.
                 return current_app.make_default_options_response()

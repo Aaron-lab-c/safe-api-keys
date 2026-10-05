@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from .._util import UTC, utcnow
 from ..exceptions import MissingDependency, StoreError
 from ..models import KeyRecord
-from .base import COLUMNS, ROTATION_FIELDS, row_to_record
+from .base import COLUMNS, ROTATION_FIELDS, UPDATABLE_FIELDS, row_to_record
 
 try:
     from django.conf import settings
@@ -101,6 +101,24 @@ class DjangoStore:
         # without the read-modify-write race on use_count.
         self._run(lambda: self._qs().filter(pk=key_id).update(
             last_used_at=self._db_dt(when), use_count=F("use_count") + 1))
+
+    def update_fields(self, key_id: str, fields: Mapping[str, Any]) -> bool:
+        bad = set(fields) - set(UPDATABLE_FIELDS)
+        if bad:
+            raise ValueError(f"cannot update columns {sorted(bad)}")
+        if not fields:
+            return self.get(key_id) is not None
+        values: Dict[str, Any] = {}
+        for c, v in fields.items():
+            if c in _DT:
+                v = self._db_dt(v)
+            elif c in ("scopes", "ip_allowlist"):
+                v = list(v)
+            elif c == "metadata":
+                v = dict(v)
+            values[c] = v
+        n = self._run(lambda: self._qs().filter(pk=key_id, revoked_at__isnull=True).update(**values))
+        return int(n) > 0
 
     def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
         fields = self._fields(old)

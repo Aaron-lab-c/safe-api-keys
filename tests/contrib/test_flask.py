@@ -95,6 +95,7 @@ def test_blueprint_options_requires_key(env):
     assert client.options("/api/me").status_code == 401
     r = client.options("/api/me", headers={"Origin": "https://app.example", "Access-Control-Request-Method": "GET"})
     assert r.status_code == 200 and "GET" in r.headers["Allow"] and not r.data.strip()  # no view body
+    assert client.options("/api/me", headers={"Access-Control-Request-Method": "GET"}).status_code == 401
     i = km.issue("u1")
     assert client.options("/api/me", headers={"Authorization": f"Bearer {i.raw_key}"}).status_code == 200
     assert client.options("/api/health").status_code == 200

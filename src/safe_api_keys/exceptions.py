@@ -14,13 +14,13 @@ __all__ = [
     "NotSupported",
     "StoreError",
     "PolicyViolation",
-    "AlreadyRotated",
     "APIKeyError",
     "MissingKey",
     "MalformedKey",
     "UnknownKey",
     "RevokedKey",
     "ExpiredKey",
+    "AlreadyRotated",
     "InsufficientScope",
     "IPNotAllowed",
     "INVALID_API_KEY_MESSAGE",
@@ -56,19 +56,6 @@ class StoreError(SafeAPIKeysError):
 
 class PolicyViolation(SafeAPIKeysError, ValueError):
     """``issue``/``rotate`` parameters violate the configured :class:`KeyPolicy`."""
-
-
-class AlreadyRotated(SafeAPIKeysError):
-    """``rotate`` was called on a key that already has a replacement (``rotated_to`` is set).
-
-    The key still verifies during its grace period, so this is a lifecycle error, not a verification
-    failure: rotate ``rotated_to`` instead.
-    """
-
-    def __init__(self, key_id: str, rotated_to: str) -> None:
-        self.key_id = key_id
-        self.rotated_to = rotated_to
-        super().__init__(f"key {key_id} was already rotated to {rotated_to}; rotate that key instead")
 
 
 class APIKeyError(SafeAPIKeysError):
@@ -130,6 +117,25 @@ class ExpiredKey(APIKeyError):
     error_code = "expired_api_key"
     public_message = "This API key has expired"
     default_reason = "expired"
+
+
+class AlreadyRotated(APIKeyError):
+    """``rotate`` was called on a key that already has a replacement (``rotated_to`` is set).
+
+    The key still verifies during its grace period; this is raised by lifecycle operations only, never by
+    ``verify``. It is an :class:`APIKeyError` so one ``except APIKeyError`` covers every state error
+    ``rotate``/``update`` can raise (``UnknownKey``, ``RevokedKey``, ``ExpiredKey``, ``AlreadyRotated``).
+    """
+
+    status_code = 409
+    error_code = "already_rotated"
+    public_message = "This API key has already been rotated"
+    default_reason = "rotated"
+
+    def __init__(self, key_id: str, rotated_to: str) -> None:
+        self.rotated_to = rotated_to
+        super().__init__(f"key {key_id} was already rotated to {rotated_to}; rotate that key instead",
+                         key_id=key_id)
 
 
 class InsufficientScope(APIKeyError):

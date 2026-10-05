@@ -7,6 +7,7 @@ import pytest
 
 from safe_api_keys import (
     AlreadyRotated,
+    APIKeyError,
     ExpiredKey,
     InsufficientScope,
     IPNotAllowed,
@@ -14,6 +15,7 @@ from safe_api_keys import (
     KeyManager,
     MalformedKey,
     NotSupported,
+    PolicyViolation,
     RevokedKey,
     StoreError,
     UnknownKey,
@@ -259,6 +261,96 @@ def test_rotate_refuses_already_rotated_key(anykm):
     assert anykm.get(a.key_id).rotated_to == b.key_id               # lineage intact, no orphan key
     assert len(anykm.list("o", include_inactive=True)) == 2
     anykm.rotate(b.key_id)                                           # the replacement rotates normally
+
+
+def test_already_rotated_is_an_api_key_error(anykm):
+    a = anykm.issue("o")
+    anykm.rotate(a.key_id)
+    with pytest.raises(APIKeyError) as ei:        # one except clause covers every rotate state error
+        anykm.rotate(a.key_id)
+    assert isinstance(ei.value, AlreadyRotated) and ei.value.status_code == 409
+    assert ei.value.error_code == "already_rotated" and ei.value.reason == "rotated"
+    anykm.verify(a.raw_key)                        # still valid during its grace period
+
+
+def test_update(anykm, clock):
+    events = []
+    getattr(anykm, "_inner", anykm).audit = CallbackAuditSink(events.append)   # through the async facade too
+    a = anykm.issue("o", scopes=["orders:read"], expires_in=timedelta(days=30), name="n")
+    anykm.verify(a.raw_key)
+    rec = anykm.update(a.key_id, scopes=["orders:*"], expires_in=timedelta(days=60), ip_allowlist=["10.0.0.0/8"],
+                       name="renamed", metadata={"team": "x"})
+    assert rec.scopes == ("orders:*",) and rec.expires_at == START + timedelta(days=60)
+    assert rec.ip_allowlist == ("10.0.0.0/8",) and rec.name == "renamed" and rec.metadata == {"team": "x"}
+    stored = anykm.get(a.key_id)
+    assert stored == rec.replace(last_used_at=stored.last_used_at, use_count=stored.use_count)
+    assert stored.use_count == 1                                   # touch() counters survived
+    anykm.verify(a.raw_key, scopes=["orders:write"], client_ip="10.1.2.3")
+    with pytest.raises(IPNotAllowed):
+        anykm.verify(a.raw_key, client_ip="8.8.8.8")
+    ev = [e for e in events if e.type == "key.updated"]
+    assert len(ev) == 1 and ev[0].key_id == a.key_id and ev[0].owner == "o"
+    assert ev[0].extra["fields"] == ["expires_at", "ip_allowlist", "metadata", "name", "scopes"]
+    assert ev[0].extra["scopes"] == ["orders:*"] and "metadata" not in ev[0].extra
+    assert anykm.update(a.key_id, name="renamed") == stored           # no change -> no write, no event
+    assert len([e for e in events if e.type == "key.updated"]) == 1
+    assert anykm.update(a.raw_key, name="by raw key").name == "by raw key"
+
+
+def test_update_validation_and_policy(clock):
+    km = make_km(clock=clock, policy=KeyPolicy(max_ttl=timedelta(days=90), allowed_scopes={"orders:*"}))
+    a = km.issue("o", scopes=["orders:read"])
+    with pytest.raises(PolicyViolation):
+        km.update(a.key_id, scopes=["admin"])
+    with pytest.raises(PolicyViolation):
+        km.update(a.key_id, expires_in=timedelta(days=100))
+    with pytest.raises(ValueError):
+        km.update(a.key_id, expires_at=START - timedelta(days=1))
+    with pytest.raises(ValueError):
+        km.update(a.key_id, expires_at=START + timedelta(days=1), expires_in=timedelta(days=1))
+    with pytest.raises(ValueError):
+        km.update(a.key_id, ip_allowlist=["not-an-ip"])
+    with pytest.raises(PolicyViolation):
+        km.update(a.key_id, metadata={"big": "x" * 9000})
+    assert km.get(a.key_id).scopes == ("orders:read",)                # nothing was written
+    with pytest.raises(UnknownKey):
+        km.update("NOSUCHKEY123", name="x")
+    b = km.issue("o", expires_in=timedelta(hours=1))
+    km.revoke(b.key_id)
+    with pytest.raises(RevokedKey):
+        km.update(b.key_id, name="x")
+    c = km.issue("o", expires_in=timedelta(hours=1))
+    clock.advance(hours=1)
+    with pytest.raises(ExpiredKey):                                   # an expired key cannot be revived
+        km.update(c.key_id, expires_in=timedelta(days=1))
+
+
+def test_update_loses_to_concurrent_revoke(clock):
+    store = MemoryStore()
+    km = make_km(store, clock=clock)
+    a = km.issue("o")
+    real_get = store.get
+
+    def get_then_revoke_elsewhere(key_id):
+        rec = real_get(key_id)
+        if rec is not None and rec.revoked_at is None:
+            store.save(rec.replace(revoked_at=clock(), revoke_reason="compromised"))
+        return rec
+
+    store.get = get_then_revoke_elsewhere
+    with pytest.raises(RevokedKey):
+        km.update(a.key_id, name="x")
+    after = real_get(a.key_id)
+    assert after.revoked_at is not None and after.name == ""
+
+
+def test_update_without_update_fields(clock):
+    class Plain(MemoryStore):
+        update_fields = None
+
+    km = make_km(Plain(), clock=clock)
+    a = km.issue("o")
+    assert km.update(a.key_id, name="x").name == "x" and km.get(a.key_id).name == "x"
 
 
 def test_rotate_loses_to_concurrent_revoke(clock):

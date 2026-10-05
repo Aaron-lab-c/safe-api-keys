@@ -95,6 +95,7 @@ HTTP/1.1 403 Forbidden
 | unknown id or wrong secret | `UnknownKey` | 401 | `invalid_api_key` |
 | revoked | `RevokedKey` | 401 | `revoked_api_key` (`invalid_api_key` with `reveal_state=False`) |
 | expired | `ExpiredKey` | 401 | `expired_api_key` (`invalid_api_key` with `reveal_state=False`) |
+| rotate/update of a key already rotated | `AlreadyRotated` | 409 | `already_rotated` (lifecycle calls only, never `verify`) |
 | missing scope | `InsufficientScope` | 403 | `insufficient_scope` |
 | IP not allowed | `IPNotAllowed` | 403 | `ip_not_allowed` |
 | store down | `StoreError` | 503 | `auth_unavailable` |
@@ -718,8 +719,17 @@ straight into that response, never put into a `messages` cookie). The admin can 
 delete: a deleted row leaves no audit trail, so clean up with `purge` instead.
 
 `APIKeyMiddleware` authenticates **every** method on `PROTECT` paths, `OPTIONS` included, so a view behind it
-never runs without a valid key. CORS preflights carry no credentials: answer them *before* this middleware
-(put `corsheaders.middleware.CorsMiddleware` above it in `MIDDLEWARE`), otherwise they get a 401.
+never runs without a valid key. CORS preflights carry no credentials, so with the default
+`"CORS_PREFLIGHT": "authenticate"` answer them *before* this middleware (put
+`corsheaders.middleware.CorsMiddleware` above it in `MIDDLEWARE`), otherwise they get a 401. If your CORS
+layer only adds headers in the response phase, set `"CORS_PREFLIGHT": "respond"`: a genuine preflight
+(`OPTIONS` with both `Origin` and `Access-Control-Request-Method`) then gets an empty 204 from the middleware
+itself, without a key and without running the view; any other `OPTIONS` still needs a key.
+
+With `USER_RESOLVER` set, the middleware and `@require_api_key` also put the resolved user into
+`request.user` (DRF already did), so plain views can use `request.user` the same way; when the resolver finds
+nobody, `request.user` is left as the auth middleware set it. Keep `APIKeyMiddleware` *below*
+`AuthenticationMiddleware`, as in the settings above.
 
 `python manage.py check` (also run by `runserver`) reports `safe_api_keys.W001` when no pepper is configured
 and `safe_api_keys.E001` when the configured one is invalid, so a deployment without a pepper is visible before
@@ -1055,6 +1065,13 @@ correlation and per-key rate limiting.
 - Length, charset and checksum are validated before any database access.
 - State decisions (revoked → expired → scope → IP) happen in the core, never via backend TTLs.
 - Usage tracking (`touch`) is a throttled partial update; failures never fail authentication.
+  `last_used_at`/`use_count` are written at most once per `touch_interval` (60 s by default), so
+  **`use_count` counts touches, not requests**: use it to tell active keys from idle ones, never for billing
+  or rate limiting (count requests in your own middleware, keyed by `key_id`).
+- Whether a `key_id` exists is **not treated as a secret**: an unknown id and a wrong secret differ by one
+  database read (about 0.1 ms), which an attacker could measure, but `key_id` is public by design (it is in
+  the raw key, in logs and in the admin) and knowing one yields nothing without the 190-bit secret, whose
+  comparison is constant-time.
 - Rotation is an atomic, conditional write on the built-in stores: a key revoked meanwhile stays revoked.
 - Rotation refuses revoked or expired keys; the replacement gets the old key's lifetime counted from now
   (never more than `policy.max_ttl`), so a time-limited key never becomes a perpetual one.
@@ -1096,12 +1113,34 @@ uses it) and adapters add `Deprecation: true` and `Sunset: <expires_at>` to resp
 
 Only a live key can be rotated: a revoked one raises `RevokedKey`, an expired one `ExpiredKey` (issue a new key
 instead), and a key already in its grace period raises `AlreadyRotated` (rotate the replacement named in
-`rotated_to` instead, so a double click never orphans a key or inherits the shortened grace lifetime). A
+`rotated_to` instead, so a double click never orphans a key or inherits the shortened grace lifetime).
+Everything `rotate()` can raise, in one place:
+
+| Exception | Meaning |
+|---|---|
+| `UnknownKey`, `RevokedKey`, `ExpiredKey`, `AlreadyRotated` | key state; all are `APIKeyError`, so one `except APIKeyError` covers them (`AlreadyRotated.status_code` is 409) |
+| `PolicyViolation`, `ValueError` | bad `grace`/`expires_*` or a policy limit |
+| `StoreError` | backend failure |
+
+A
 `revoke()` that lands while a `rotate()` is in flight wins: the built-in stores apply the rotation
 as one atomic, conditional write (`save_rotation`), so the old key stays revoked, no replacement is written and
 `rotate()` raises `RevokedKey`. A custom store gets the same guarantee by implementing
 `save_rotation(new, old) -> bool` (see `safe_api_keys.stores.base.KeyStore`); without it the manager re-checks
 right before writing, which narrows the window but cannot close it.
+
+**Changing a key in place** — scopes, expiry, IP allow-list, name and metadata can be updated without
+reissuing (`None` = unchanged); the same policy checks as `issue()` apply and a `key.updated` audit event
+records which fields changed:
+
+```python
+km.update(key_id, scopes=["orders:*"], expires_in=timedelta(days=90), ip_allowlist=["10.0.0.0/8"])
+```
+
+Only a live key can be updated (`RevokedKey`/`ExpiredKey` otherwise: an expired key is not revived by moving
+its expiry; rotate or issue instead), the expiry can be moved but not removed, and the write is a partial,
+conditional one on every built-in store (`update_fields`), so it never clobbers a concurrent `revoke()` or
+usage counters. The async manager has the same method.
 
 **Pepper rotation** — add a new version, keep the old one for verification:
 
@@ -1139,7 +1178,7 @@ Policies apply to `issue`/`rotate` only, so tightening a policy never breaks key
 
 `key.issued`, `key.verified`, `key.rejected` (with `reason`: malformed/checksum/prefix/unknown/bad_secret/
 pepper_version_missing/revoked/expired/scope/ip), `key.revoked`, `key.rotated`, `key.rotate_partial`,
-`key.touch_failed`, `key.purged`. Sinks never raise.
+`key.updated` (`extra["fields"]` lists what changed), `key.touch_failed`, `key.purged`. Sinks never raise.
 
 ```python
 import logging

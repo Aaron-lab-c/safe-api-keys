@@ -10,7 +10,7 @@ import ipaddress
 import logging
 import warnings
 from datetime import datetime, timedelta
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, Tuple, Union
 
 from ._util import ensure_aware, optional_aware, utcnow
 from .audit import AuditEvent, AuditSink, NullAuditSink, safe_emit
@@ -48,6 +48,8 @@ __all__ = [
     "build_new_key",
     "plan_revoke",
     "plan_rotation",
+    "plan_update",
+    "check_live",
     "check_rotatable",
     "inherited_expiry",
     "key_id_from",
@@ -253,17 +255,58 @@ def plan_revoke(record: KeyRecord, now: datetime, reason: Optional[str]) -> KeyR
     return record.replace(revoked_at=now, revoke_reason=reason)
 
 
+def check_live(record: KeyRecord, now: datetime) -> None:
+    """Lifecycle operations (rotate/update) only apply to a key that is neither revoked nor expired."""
+    now = ensure_aware(now, "now")
+    if record.revoked_at is not None:
+        raise RevokedKey(key_id=record.key_id)
+    if record.expires_at is not None and record.expires_at <= now:
+        raise ExpiredKey(key_id=record.key_id)
+
+
 def check_rotatable(old: KeyRecord, now: datetime) -> None:
     """Only a live, not-yet-rotated key can be rotated: a revoked or expired one must not get a working
     replacement, and a key in its grace period already has one (rotating it again would orphan that
     replacement and inherit the shortened grace lifetime)."""
-    now = ensure_aware(now, "now")
-    if old.revoked_at is not None:
-        raise RevokedKey(key_id=old.key_id)
-    if old.expires_at is not None and old.expires_at <= now:
-        raise ExpiredKey(key_id=old.key_id)
+    check_live(old, now)
     if old.rotated_to:
         raise AlreadyRotated(old.key_id, old.rotated_to)
+
+
+def plan_update(
+    record: KeyRecord,
+    now: datetime,
+    policy: KeyPolicy,
+    *,
+    name: Optional[str] = None,
+    scopes: Optional[Iterable[str]] = None,
+    expires_at: Optional[datetime] = None,
+    expires_in: Optional[timedelta] = None,
+    ip_allowlist: Optional[Iterable[str]] = None,
+    metadata: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Validate an in-place change to a live key and return the changed fields (``{}`` if nothing changes).
+
+    ``None`` means "leave as is". The same validation and policy as :func:`build_new_key` applies: scopes
+    against ``allowed_scopes``/``allow_no_scope``, the new expiry must be in the future and within
+    ``max_ttl``, IPs/CIDRs are normalised, metadata is size/depth checked. Pure: does not persist.
+    """
+    now = ensure_aware(now, "now")
+    check_live(record, now)
+    changes: Dict[str, Any] = {}
+    if name is not None:
+        changes["name"] = _validate_text(name, "name", required=False)
+    if scopes is not None:
+        norm = normalize_scopes(scopes)
+        policy.check_scopes(norm)
+        changes["scopes"] = norm
+    if expires_at is not None or expires_in is not None:
+        changes["expires_at"] = policy.resolve_expiry(now, _resolve_expiry(now, expires_at, expires_in))
+    if ip_allowlist is not None:
+        changes["ip_allowlist"] = normalize_allowlist(ip_allowlist)
+    if metadata is not None:
+        changes["metadata"] = validate_metadata(metadata, policy.max_metadata_bytes)
+    return {k: v for k, v in changes.items() if getattr(record, k) != v}
 
 
 def inherited_expiry(old: KeyRecord, now: datetime, policy: KeyPolicy) -> Optional[datetime]:

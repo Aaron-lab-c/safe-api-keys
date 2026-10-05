@@ -16,7 +16,7 @@ __all__ = [
     "sunset_headers",
     "resolve_client_ip",
     "TrustedProxies",
-    "path_matches",
+    "path_matches", "is_cors_preflight",
 ]
 
 ErrorResponse = Tuple[int, Dict[str, str], Dict[str, Any]]
@@ -102,6 +102,20 @@ def resolve_client_ip(remote_addr: Optional[str], forwarded_for: Optional[str] =
             continue
         return ip
     return _valid_ip(hops[0]) if hops else peer
+
+
+def is_cors_preflight(method: str, headers: Any) -> bool:
+    """A browser CORS preflight: ``OPTIONS`` with both ``Origin`` and ``Access-Control-Request-Method``.
+
+    Browsers send it without credentials, so it can never carry an API key. ``headers`` is any
+    case-insensitive mapping (Django ``request.headers``, Werkzeug/Starlette headers).
+    """
+    if method.upper() != "OPTIONS":
+        return False
+    get = getattr(headers, "get", None)
+    if get is None:
+        return False
+    return bool(get("Origin")) and bool(get("Access-Control-Request-Method"))
 
 
 def path_matches(path: str, prefixes: Iterable[str]) -> bool:

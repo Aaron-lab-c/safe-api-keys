@@ -94,6 +94,40 @@ def test_middleware_authenticates_options(client):
     assert client.options("/mw/health/").status_code == 200
 
 
+def test_cors_preflight_setting(client, settings):
+    preflight = {"HTTP_ORIGIN": "https://app.example", "HTTP_ACCESS_CONTROL_REQUEST_METHOD": "GET"}
+    settings.SAFE_API_KEYS = {**settings.SAFE_API_KEYS, "CORS_PREFLIGHT": "respond"}
+    r = client.options("/mw/any/", **preflight)
+    assert r.status_code == 204 and not r.content                      # answered here, view never ran
+    assert client.options("/mw/any/").status_code == 401                # plain OPTIONS still needs a key
+    assert client.options("/mw/any/", HTTP_ORIGIN="https://app.example").status_code == 401
+    assert client.get("/mw/any/", **preflight).status_code == 401       # only OPTIONS is a preflight
+    assert client.options("/mw/health/", **preflight).status_code == 200  # exempt paths untouched
+    settings.SAFE_API_KEYS = {**settings.SAFE_API_KEYS, "CORS_PREFLIGHT": "nope"}
+    with pytest.raises(ImproperlyConfigured):
+        validate_settings()
+
+
+def test_request_user_from_resolver(client, django_user_model):
+    km = get_manager()
+    django_user_model.objects.create(username="alice")
+    i = km.issue("alice")
+    j = km.issue("nobody")
+    for path in ("/whoami/", "/mw/whoami/"):                   # decorator and middleware alike
+        assert client.get(path, **bearer(i.raw_key)).json() == {"owner": "alice", "user": "alice",
+                                                                 "authenticated": True}
+        r = client.get(path, **bearer(j.raw_key)).json()          # resolver finds nobody: user left alone
+        assert r["owner"] == "nobody" and r["authenticated"] is False
+
+
+def test_request_user_untouched_without_resolver(client, settings, django_user_model):
+    settings.SAFE_API_KEYS = {**settings.SAFE_API_KEYS, "USER_RESOLVER": None}
+    km = get_manager()
+    django_user_model.objects.create(username="alice")
+    i = km.issue("alice")
+    assert client.get("/whoami/", **bearer(i.raw_key)).json()["authenticated"] is False
+
+
 def test_system_check_warns_without_pepper(settings, monkeypatch):
     from django.core import checks
 
