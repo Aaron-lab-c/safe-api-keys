@@ -1,4 +1,9 @@
-"""``APIKeyMiddleware``: protect ``SAFE_API_KEYS['PROTECT']`` path prefixes (minus ``EXEMPT``)."""
+"""``APIKeyMiddleware``: protect ``SAFE_API_KEYS['PROTECT']`` path prefixes (minus ``EXEMPT``).
+
+Every method is authenticated, ``OPTIONS`` included: a view behind ``PROTECT`` must never run without a
+valid key, whatever the method. CORS preflights carry no credentials, so answer them *before* this
+middleware (e.g. put ``corsheaders.middleware.CorsMiddleware`` above it in ``MIDDLEWARE``).
+"""
 
 from __future__ import annotations
 
@@ -23,8 +28,7 @@ class APIKeyMiddleware:
 
     def __call__(self, request: HttpRequest) -> Any:
         cfg = get_settings()
-        if request.method != "OPTIONS" and path_matches(request.path, cfg["PROTECT"]) \
-                and not path_matches(request.path, cfg["EXEMPT"]):
+        if path_matches(request.path, cfg["PROTECT"]) and not path_matches(request.path, cfg["EXEMPT"]):
             try:
                 authenticate_request(request)
             except (APIKeyError, StoreError) as exc:

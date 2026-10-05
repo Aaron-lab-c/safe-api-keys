@@ -14,8 +14,10 @@ from ._logic import (
     Clock,
     _Core,
     build_new_key,
+    check_rotatable,
     check_secret,
     decide,
+    inherited_expiry,
     key_id_from,
     plan_revoke,
     plan_rotation,
@@ -200,9 +202,10 @@ class AsyncKeyManager(AsyncKeyVerifier):
         old = await self.get(key_id)
         if old is None:
             raise UnknownKey(reason="unknown", key_id=key_id)
-        if old.revoked_at is not None:
-            raise RevokedKey(key_id=key_id)
         now = self.now()
+        check_rotatable(old, now)
+        if expires_at is None and expires_in is None:
+            expires_at = inherited_expiry(old, now, self.policy)
         plan_rotation(old, "x" * self.key_format.key_id_len, now, grace)
         issued = await self._new_unique(now, None, owner=old.owner, scopes=old.scopes, expires_at=expires_at,
                                         expires_in=expires_in, name=old.name, metadata=old.metadata,
@@ -216,6 +219,14 @@ class AsyncKeyManager(AsyncKeyVerifier):
         return issued
 
     async def _save_rotation(self, new: KeyRecord, old: KeyRecord) -> None:
+        save_rotation = getattr(self.store, "save_rotation", None)
+        if callable(save_rotation):  # atomic + conditional: a concurrent revoke wins and nothing is written
+            if not await self._call(save_rotation, new, old):
+                raise await self._rotation_refused(old.key_id)
+            return
+        current = await self.get(old.key_id)  # best effort for stores without save_rotation
+        if current is None or current.revoked_at is not None:
+            raise await self._rotation_refused(old.key_id)
         save_many = getattr(self.store, "save_many", None)
         if callable(save_many):
             await self._call(save_many, [new, old])
@@ -227,6 +238,11 @@ class AsyncKeyManager(AsyncKeyVerifier):
             self._event("key.rotate_partial", key_id=old.key_id, owner=old.owner,
                         extra={"rotated_to": new.key_id})
             raise
+
+    async def _rotation_refused(self, key_id: str) -> APIKeyError:
+        if await self.get(key_id) is None:
+            return UnknownKey(reason="unknown", key_id=key_id)
+        return RevokedKey(key_id=key_id)
 
     async def list(self, owner: Optional[str] = None, *, include_inactive: bool = False) -> List[KeyRecord]:
         fn = self._require("list")

@@ -19,7 +19,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from .._util import to_iso
 from ..exceptions import MissingDependency, StoreError
 from ..models import KeyRecord
-from .base import COLUMNS, filter_records, record_to_row, row_to_record
+from .base import COLUMNS, ROTATION_FIELDS, filter_records, record_to_row, row_to_record
 
 try:
     from redis.exceptions import RedisError, WatchError
@@ -29,6 +29,7 @@ except ImportError as exc:  # pragma: no cover - depends on extras
 __all__ = ["RedisStore", "AsyncRedisStore"]
 
 _NULL = ""
+_WATCH_RETRIES = 5
 
 
 def _encode(record: KeyRecord) -> Dict[str, str]:
@@ -83,6 +84,19 @@ def _queue_save(keys: _Keys, pipe: Any, record: KeyRecord) -> None:
         pipe.persist(k)
     else:
         pipe.expireat(k, exp)
+
+
+def _queue_rotation(keys: _Keys, pipe: Any, current: KeyRecord, old: KeyRecord, new: KeyRecord) -> None:
+    """MULTI body of ``save_rotation``: partial update of the old hash (+ its housekeeping TTL), then the new key."""
+    k = keys.key(old.key_id)
+    encoded = _encode(old)
+    pipe.hset(k, mapping={c: encoded[c] for c in ROTATION_FIELDS})
+    exp = keys.expire_at(current.replace(**{c: getattr(old, c) for c in ROTATION_FIELDS}))
+    if exp is None:
+        pipe.persist(k)
+    else:
+        pipe.expireat(k, exp)
+    _queue_save(keys, pipe, new)
 
 
 def _wrap(exc: Exception) -> StoreError:
@@ -140,6 +154,29 @@ class RedisStore:
                     pipe.execute()
             except WatchError:  # someone wrote the key meanwhile: it is a real record now
                 pass
+
+    def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
+        # WATCH/MULTI: if the old hash changes between the revocation check and EXEC the write is retried,
+        # so a key revoked meanwhile is never un-revoked by a rotation.
+        k = self._k.key(old.key_id)
+        try:
+            with self.client.pipeline(transaction=True) as pipe:
+                for _ in range(_WATCH_RETRIES):
+                    try:
+                        pipe.watch(k)
+                        current = _decode(pipe.hgetall(k))
+                        if current is None or current.revoked_at is not None:
+                            pipe.unwatch()
+                            return False
+                        pipe.multi()
+                        _queue_rotation(self._k, pipe, current, old, new)
+                        pipe.execute()
+                        return True
+                    except WatchError:
+                        continue
+        except RedisError as exc:
+            raise _wrap(exc) from exc
+        raise StoreError("Redis error: rotation kept conflicting with concurrent writes")
 
     def _ids(self, owner: Optional[str]) -> List[str]:
         members = self.client.smembers(self._k.owner(owner) if owner is not None else self._k.all)
@@ -248,6 +285,27 @@ class AsyncRedisStore:
                     await pipe.execute()
             except WatchError:
                 pass
+
+    async def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
+        k = self._k.key(old.key_id)
+        try:
+            async with self.client.pipeline(transaction=True) as pipe:
+                for _ in range(_WATCH_RETRIES):
+                    try:
+                        await pipe.watch(k)
+                        current = _decode(await pipe.hgetall(k))
+                        if current is None or current.revoked_at is not None:
+                            await pipe.unwatch()
+                            return False
+                        pipe.multi()
+                        _queue_rotation(self._k, pipe, current, old, new)
+                        await pipe.execute()
+                        return True
+                    except WatchError:
+                        continue
+        except RedisError as exc:
+            raise _wrap(exc) from exc
+        raise StoreError("Redis error: rotation kept conflicting with concurrent writes")
 
     async def list(self, owner: Optional[str] = None, *, include_inactive: bool = False,
                    now: Optional[datetime] = None) -> List[KeyRecord]:

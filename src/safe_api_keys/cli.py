@@ -2,11 +2,15 @@
 
 Exit codes: 0 success, 1 verification failed / not found, 2 bad arguments or configuration, 3 store error.
 Only ``issue``/``rotate`` ever print a raw key (once); everything else is masked.
+
+``verify`` and ``parse`` read the raw key from **stdin** when it is omitted (or given as ``-``): a key on the
+command line is visible to every user on the host (``ps``) and lands in the shell history.
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import io
 import json
 import os
@@ -32,6 +36,8 @@ __all__ = ["main", "build_parser", "add_commands", "execute", "EXIT_OK", "EXIT_F
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_STORE = 0, 1, 2, 3
 SAVE_WARNING = "Store this key now: it will not be shown again. (請立刻保存，不會再顯示)"
+RAW_KEY_HELP = ("raw key; omit it or pass '-' to read it from stdin (recommended: an argument shows up in "
+                "`ps` and the shell history)")
 _NO_STORE = ("parse",)
 _NEEDS_PEPPER = ("issue", "verify", "rotate")
 
@@ -97,9 +103,9 @@ def add_commands(sub: Any, *, standalone: bool = True) -> None:
     p.add_argument("--meta", nargs="*", default=[], help="metadata key=value")
     p.add_argument("--json", action="store_true")
 
-    p = sub.add_parser("verify", help="verify a raw key (exit 0 valid / 1 invalid)")
+    p = sub.add_parser("verify", help="verify a raw key (exit 0 valid / 1 invalid); reads stdin by default")
     common(p, prefix=True)
-    p.add_argument("raw_key")
+    p.add_argument("raw_key", nargs="?", default=None, help=RAW_KEY_HELP)
     p.add_argument("--scopes", nargs="*", default=[])
     p.add_argument("--ip", default=None)
     p.add_argument("--json", action="store_true")
@@ -126,8 +132,8 @@ def add_commands(sub: Any, *, standalone: bool = True) -> None:
     p.add_argument("--older-than", required=True)
 
     if standalone:
-        p = sub.add_parser("parse", help="parse a raw key without touching any store")
-        p.add_argument("raw_key")
+        p = sub.add_parser("parse", help="parse a raw key without touching any store; reads stdin by default")
+        p.add_argument("raw_key", nargs="?", default=None, help=RAW_KEY_HELP)
         p.add_argument("--json", action="store_true")
 
 
@@ -140,6 +146,22 @@ def build_parser(prog: str = "safe-api-keys") -> argparse.ArgumentParser:
 
 
 # --------------------------------------------------------------------------- execution
+def _raw_key(args: argparse.Namespace, stdin: Optional[TextIO], err: TextIO) -> str:
+    """The raw key argument, or (when omitted / ``-``) one line from stdin — without echo on a terminal."""
+    value = getattr(args, "raw_key", None)
+    if value is not None and value != "-":
+        return str(value)
+    stream = sys.stdin if stdin is None else stdin
+    if stream is None:
+        raise UsageError("no raw key: pass it on stdin")
+    if getattr(stream, "isatty", lambda: False)():
+        return getpass.getpass("API key: ", stream=err)
+    line = stream.readline()
+    if not line:
+        raise UsageError("no raw key: pass it on stdin (or as an argument)")
+    return line.strip()
+
+
 def _manager_from_args(args: argparse.Namespace) -> Any:
     from .manager import KeyManager
     from .policy import KeyPolicy
@@ -160,7 +182,7 @@ def _manager_from_args(args: argparse.Namespace) -> Any:
 
 
 def execute(args: argparse.Namespace, km_factory: Callable[[argparse.Namespace], Any],
-            out: TextIO, err: TextIO) -> int:
+            out: TextIO, err: TextIO, stdin: Optional[TextIO] = None) -> int:
     def say(text: str = "") -> None:
         out.write(text + "\n")
 
@@ -170,7 +192,7 @@ def execute(args: argparse.Namespace, km_factory: Callable[[argparse.Namespace],
     cmd = args.command
     try:
         if cmd == "parse":
-            p = parse_key(args.raw_key, strict_checksum=False)
+            p = parse_key(_raw_key(args, stdin, err), strict_checksum=False)
             info = {"prefix": p.prefix, "key_id": p.key_id, "masked": p.masked, "checksum_ok": p.checksum_ok}
             if args.json:
                 dump(info)
@@ -193,8 +215,9 @@ def execute(args: argparse.Namespace, km_factory: Callable[[argparse.Namespace],
             return EXIT_OK
 
         if cmd == "verify":
+            raw = _raw_key(args, stdin, err)
             try:
-                rec = km.verify(args.raw_key, scopes=_split(args.scopes) or None, client_ip=args.ip, touch=False)
+                rec = km.verify(raw, scopes=_split(args.scopes) or None, client_ip=args.ip, touch=False)
             except APIKeyError as exc:
                 if args.json:
                     dump({"ok": False, "error": exc.error_code, "reason": exc.reason, "key_id": exc.key_id})

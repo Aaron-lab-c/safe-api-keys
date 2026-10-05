@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from .._util import UTC, utcnow
 from ..exceptions import MissingDependency, StoreError
 from ..models import KeyRecord
-from .base import COLUMNS, row_to_record
+from .base import COLUMNS, ROTATION_FIELDS, row_to_record
 
 try:
     from django.conf import settings
@@ -101,6 +101,19 @@ class DjangoStore:
         # without the read-modify-write race on use_count.
         self._run(lambda: self._qs().filter(pk=key_id).update(
             last_used_at=self._db_dt(when), use_count=F("use_count") + 1))
+
+    def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
+        fields = self._fields(old)
+        values = {c: fields[c] for c in ROTATION_FIELDS}
+
+        def run() -> bool:
+            with transaction.atomic(using=self.using):
+                # partial + conditional: a key revoked meanwhile is never un-revoked by a rotation
+                if self._qs().filter(pk=old.key_id, revoked_at__isnull=True).update(**values) == 0:
+                    return False
+                self.model(**self._fields(new)).save(using=self.using)
+                return True
+        return bool(self._run(run))
 
     def list(self, owner: Optional[str] = None, *, include_inactive: bool = False,
              now: Optional[datetime] = None) -> List[KeyRecord]:

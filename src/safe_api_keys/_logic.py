@@ -47,6 +47,8 @@ __all__ = [
     "build_new_key",
     "plan_revoke",
     "plan_rotation",
+    "check_rotatable",
+    "inherited_expiry",
     "key_id_from",
     "KEY_ID_RETRIES",
 ]
@@ -248,6 +250,25 @@ def plan_revoke(record: KeyRecord, now: datetime, reason: Optional[str]) -> KeyR
     if reason is not None:
         reason = _validate_text(reason, "reason", required=False) or None
     return record.replace(revoked_at=now, revoke_reason=reason)
+
+
+def check_rotatable(old: KeyRecord, now: datetime) -> None:
+    """Only a live key can be rotated: a revoked or expired one must not get a working replacement."""
+    now = ensure_aware(now, "now")
+    if old.revoked_at is not None:
+        raise RevokedKey(key_id=old.key_id)
+    if old.expires_at is not None and old.expires_at <= now:
+        raise ExpiredKey(key_id=old.key_id)
+
+
+def inherited_expiry(old: KeyRecord, now: datetime, policy: KeyPolicy) -> Optional[datetime]:
+    """Default expiry of a replacement key: the old key's ``expires_at`` (a rotation never extends a key's
+    lifetime), capped at ``policy.max_ttl`` in case the policy was tightened since the key was issued.
+    ``None`` (a key without expiry) falls through to the policy defaults in :func:`build_new_key`."""
+    expires_at = old.expires_at
+    if expires_at is not None and policy.max_ttl is not None:
+        expires_at = min(expires_at, ensure_aware(now, "now") + policy.max_ttl)
+    return expires_at
 
 
 def plan_rotation(old: KeyRecord, new_key_id: str, now: datetime, grace: timedelta) -> KeyRecord:

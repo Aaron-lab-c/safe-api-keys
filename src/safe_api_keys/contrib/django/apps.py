@@ -8,7 +8,7 @@ class SafeAPIKeysConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
 
     def ready(self) -> None:
-        from . import conf
+        from . import checks, conf  # noqa: F401 - importing registers the system checks
 
         conf.validate_settings()  # raises ImproperlyConfigured on bad SAFE_API_KEYS
         conf.connect_signals()

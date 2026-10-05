@@ -60,7 +60,7 @@ Homepage = "https://github.com/Aaron-lab-c/safe-api-keys"
 where = ["src"]
 
 [tool.setuptools.package-data]
-safe_api_keys = ["py.typed"]
+safe_api_keys = ["py.typed", "contrib/django/templates/safe_api_keys/admin/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

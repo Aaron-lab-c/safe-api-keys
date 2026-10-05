@@ -483,7 +483,8 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
-    "safe_api_keys.contrib.django.middleware.APIKeyMiddleware",   # 選用：用 PROTECT/EXEMPT 一次保護路徑
+    # 選用：用 PROTECT/EXEMPT 一次保護路徑（所有方法都驗證，含 OPTIONS；CORS middleware 要放在它前面）
+    "safe_api_keys.contrib.django.middleware.APIKeyMiddleware",
 ]
 
 TEMPLATES = [{
@@ -696,7 +697,17 @@ python manage.py apikey rotate <key_id> --grace 24h
 python manage.py apikey revoke <key_id> --reason compromised
 ```
 
-…or press **Add API key** in the Django admin: the raw key is shown once in the success message.
+…or press **Add API key** in the Django admin: the raw key is shown once on a result page (it is rendered
+straight into that response, never put into a `messages` cookie). The admin can revoke and rotate but not
+delete: a deleted row leaves no audit trail, so clean up with `purge` instead.
+
+`APIKeyMiddleware` authenticates **every** method on `PROTECT` paths, `OPTIONS` included, so a view behind it
+never runs without a valid key. CORS preflights carry no credentials: answer them *before* this middleware
+(put `corsheaders.middleware.CorsMiddleware` above it in `MIDDLEWARE`), otherwise they get a 401.
+
+`python manage.py check` (also run by `runserver`) reports `safe_api_keys.W001` when no pepper is configured
+and `safe_api_keys.E001` when the configured one is invalid, so a deployment without a pepper is visible before
+the first request fails.
 
 Test settings and tests:
 
@@ -955,7 +966,7 @@ exempt=("/api/health",))` protects a whole prefix. Call `auth.install(app)` so e
 - Rotation flow: user clicks rotate → gets new key → updates client → within the 24 h grace the old key still
   works and responses carry `Deprecation`/`Sunset` → then it expires.
 - Suspected leak: `revoke(reason="compromised")` is immediate (with `VerifyCache`, other processes may accept
-  it for up to `cache.ttl` seconds).
+  it for up to `cache.ttl` seconds). A rotation racing with it loses: the key stays revoked.
 - Run `purge(older_than=timedelta(days=90))` periodically, or keep records for audit.
 - Rate-limit outside the adapter (`slowapi`, `flask-limiter`, `django-ratelimit`) keyed by `key_id`; adapters
   accept `on_rejected(client_ip, key_id)` for failure counting.
@@ -1018,6 +1029,9 @@ correlation and per-key rate limiting.
 - Length, charset and checksum are validated before any database access.
 - State decisions (revoked → expired → scope → IP) happen in the core, never via backend TTLs.
 - Usage tracking (`touch`) is a throttled partial update; failures never fail authentication.
+- Rotation is an atomic, conditional write on the built-in stores: a key revoked meanwhile stays revoked.
+- Rotation never extends a key's lifetime (the new key keeps the old expiry by default) and refuses revoked or
+  expired keys.
 - 401 responses carry `WWW-Authenticate`; 401/403 carry `Cache-Control: no-store`.
 - `X-Forwarded-For` is ignored unless `trust_proxy=True` / `trusted_proxies=[...]`; keys in query strings
   are off by default.
@@ -1044,6 +1058,8 @@ Step-by-step table creation for **Flask (create_all / Alembic / Flask-SQLAlchemy
 
 ```python
 new = km.rotate(old_key_id, grace=timedelta(hours=24))   # new key inherits owner/name/scopes/metadata/IPs
+# ...and the old key's expires_at: a rotation never extends a key's lifetime (pass expires_in=/expires_at=
+# for a new lifetime; a key without expiry gets the policy default, as on issue)
 # old key: expires_at = min(original, now + 24h), rotated_to = new.key_id
 # grace=timedelta(0) revokes the old key immediately
 km.lineage(new.key_id)                                     # whole chain, oldest first
@@ -1051,6 +1067,13 @@ km.lineage(new.key_id)                                     # whole chain, oldest
 
 During the grace period, verifying the old key emits `key.verified` with `extra["rotated_to"]` (monitor who still
 uses it) and adapters add `Deprecation: true` and `Sunset: <expires_at>` to responses.
+
+Only a live key can be rotated: a revoked one raises `RevokedKey`, an expired one `ExpiredKey` (issue a new key
+instead). A `revoke()` that lands while a `rotate()` is in flight wins: the built-in stores apply the rotation
+as one atomic, conditional write (`save_rotation`), so the old key stays revoked, no replacement is written and
+`rotate()` raises `RevokedKey`. A custom store gets the same guarantee by implementing
+`save_rotation(new, old) -> bool` (see `safe_api_keys.stores.base.KeyStore`); without it the manager re-checks
+right before writing, which narrows the window but cannot close it.
 
 **Pepper rotation** — add a new version, keep the old one for verification:
 
@@ -1112,14 +1135,19 @@ km = KeyManager(store, "acme_live", pepper=PEPPER, audit=CallbackAuditSink(to_ot
 ```bash
 export SAFE_API_KEYS_PEPPER=...  SAFE_API_KEYS_STORE=sqlite:///keys.db
 safe-api-keys issue  --prefix acme_live --owner svc --scopes reports:* --expires 90d
-safe-api-keys verify --prefix acme_live acme_live_...      # exit 0 valid / 1 invalid
+safe-api-keys verify --prefix acme_live < key.txt          # exit 0 valid / 1 invalid; key read from stdin
 safe-api-keys list   [--owner O] [--all] [--json]
 safe-api-keys rotate --prefix acme_live KEY_ID --grace 24h
 safe-api-keys revoke KEY_ID --reason compromised
 safe-api-keys purge  --older-than 90d
-safe-api-keys parse  acme_live_...                         # no store needed
+safe-api-keys parse  < key.txt                             # no store needed
 ```
 Exit codes: 0 ok, 1 invalid/not found, 2 usage/config error, 3 store error. Only `issue`/`rotate` print a raw key.
+
+`verify` and `parse` read the raw key from **stdin** (on a terminal they prompt without echo). They still accept
+it as an argument (`safe-api-keys verify --prefix acme_live acme_live_...`), but an argument is visible to every
+user on the host through `ps` and ends up in the shell history, so prefer stdin, and give `rotate`/`revoke` the
+public `KEY_ID`, not the raw key.
 
 ## Migrating from djangorestframework-api-key
 

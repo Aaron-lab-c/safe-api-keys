@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional, Union
 from .._util import to_iso, utcnow
 from ..exceptions import StoreError
 from ..models import KeyRecord
-from .base import COLUMNS, record_to_row, row_to_record
+from .base import COLUMNS, ROTATION_FIELDS, record_to_row, row_to_record
 
 __all__ = ["SQLiteStore", "SCHEMA_SQL"]
 
@@ -75,6 +75,9 @@ class SQLiteStore:
             "upsert": f"INSERT INTO {t} ({cols}) VALUES ({marks}) ON CONFLICT(key_id) DO UPDATE SET {updates}",  # nosec B608
             "get": f"SELECT * FROM {t} WHERE key_id = ?",  # nosec B608
             "touch": f"UPDATE {t} SET last_used_at = ?, use_count = use_count + 1 WHERE key_id = ?",  # nosec B608
+            # partial + conditional: a key revoked meanwhile is never un-revoked by a rotation
+            "rotate": f"UPDATE {t} SET {', '.join(f'{c} = :{c}' for c in ROTATION_FIELDS)} "  # nosec B608
+                      "WHERE key_id = :key_id AND revoked_at IS NULL",
             "select": f"SELECT * FROM {t}",  # nosec B608
             "delete": f"DELETE FROM {t} WHERE key_id = ?",  # nosec B608
             "purge": f"DELETE FROM {t} WHERE (revoked_at IS NOT NULL AND revoked_at < ?) "  # nosec B608
@@ -111,6 +114,26 @@ class SQLiteStore:
 
     def touch(self, key_id: str, when: datetime) -> None:
         self._exec(self._sql["touch"], (to_iso(when), key_id))
+
+    def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
+        old_row = record_to_row(old)
+        params = {c: old_row[c] for c in ROTATION_FIELDS}
+        params["key_id"] = old.key_id
+        try:
+            with self._lock:
+                self._conn.execute("BEGIN IMMEDIATE")
+                try:
+                    if self._conn.execute(self._sql["rotate"], params).rowcount == 0:
+                        self._conn.execute("ROLLBACK")
+                        return False
+                    self._conn.execute(self._sql["upsert"], record_to_row(new))
+                    self._conn.execute("COMMIT")
+                except BaseException:
+                    self._conn.execute("ROLLBACK")
+                    raise
+        except sqlite3.Error as exc:
+            raise StoreError(f"SQLite error: {type(exc).__name__}") from exc
+        return True
 
     def list(self, owner: Optional[str] = None, *, include_inactive: bool = False,
              now: Optional[datetime] = None) -> List[KeyRecord]:

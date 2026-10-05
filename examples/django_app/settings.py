@@ -30,7 +30,8 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
-    "safe_api_keys.contrib.django.middleware.APIKeyMiddleware",   # 選用：用 PROTECT/EXEMPT 一次保護路徑
+    # 選用：用 PROTECT/EXEMPT 一次保護路徑（所有方法都驗證，含 OPTIONS；CORS middleware 要放在它前面）
+    "safe_api_keys.contrib.django.middleware.APIKeyMiddleware",
 ]
 
 TEMPLATES = [{

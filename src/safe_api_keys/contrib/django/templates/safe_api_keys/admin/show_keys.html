@@ -1,0 +1,28 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+{% block title %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+<a href="{% url 'admin:index' %}">{% translate 'Home' %}</a>
+&rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+&rsaquo; <a href="{{ changelist_url }}">{{ opts.verbose_name_plural|capfirst }}</a>
+&rsaquo; {{ title }}
+</div>
+{% endblock %}
+{% block content %}
+<div id="content-main">
+  <p class="errornote">{{ once }}</p>
+  <table>
+    <thead><tr><th>{% translate 'Key' %}</th><th>{% translate 'Raw key (shown once)' %}</th></tr></thead>
+    <tbody>
+    {% for item in issued %}
+      <tr>
+        <td>{% if item.new_masked %}{{ item.masked }} &rarr; {{ item.new_masked }}{% else %}{{ item.masked }}{% endif %}</td>
+        <td><code>{{ item.raw_key }}</code></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p><a href="{{ changelist_url }}" class="button">{% translate 'Back to API keys' %}</a></p>
+</div>
+{% endblock %}

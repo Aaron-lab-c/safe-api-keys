@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ..exceptions import MissingDependency, StoreError
 from ..models import KeyRecord
-from .base import COLUMNS, record_to_row, row_to_record
+from .base import COLUMNS, ROTATION_FIELDS, record_to_row, row_to_record
 
 try:
     import sqlalchemy as sa
@@ -152,6 +152,13 @@ class _Statements:
         return (sa.update(self.table).where(self.c.key_id == key_id)
                 .values(last_used_at=self.dt(when), use_count=self.c.use_count + 1))
 
+    def rotate_old(self, old: KeyRecord) -> Any:
+        # Partial + conditional update: a key revoked meanwhile is never un-revoked by a rotation.
+        row = self.row(old)
+        values = {c: row[c] for c in ROTATION_FIELDS}
+        return (sa.update(self.table).where(self.c.key_id == old.key_id, self.c.revoked_at.is_(None))
+                .values(**values))
+
     def list(self, owner: Optional[str], include_inactive: bool, now: Optional[datetime]) -> Any:
         stmt = sa.select(self.table)
         if owner is not None:
@@ -229,6 +236,14 @@ class SQLAlchemyStore:
     def touch(self, key_id: str, when: datetime) -> None:
         self._tx(lambda s: s.execute(self._q.touch(key_id, when)))
 
+    def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
+        def run(s: Any) -> bool:
+            if s.execute(self._q.rotate_old(old)).rowcount == 0:
+                return False
+            self._upsert(s, new)
+            return True
+        return bool(self._tx(run))
+
     def list(self, owner: Optional[str] = None, *, include_inactive: bool = False,
              now: Optional[datetime] = None) -> List[KeyRecord]:
         rows = self._tx(lambda s: s.execute(self._q.list(owner, include_inactive, now)).mappings().all())
@@ -302,6 +317,14 @@ class AsyncSQLAlchemyStore:
 
     async def touch(self, key_id: str, when: datetime) -> None:
         await self._tx(lambda s: s.execute(self._q.touch(key_id, when)))
+
+    async def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
+        async def run(s: Any) -> bool:
+            if (await s.execute(self._q.rotate_old(old))).rowcount == 0:
+                return False
+            await self._upsert(s, new)
+            return True
+        return bool(await self._tx(run))
 
     async def list(self, owner: Optional[str] = None, *, include_inactive: bool = False,
                    now: Optional[datetime] = None) -> List[KeyRecord]:

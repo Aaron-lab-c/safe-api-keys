@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 from ..models import KeyRecord
-from .base import filter_records
+from .base import filter_records, rotation_fields
 
 if TYPE_CHECKING:  # pragma: no cover
     from .base import AsyncStoreAdapter
@@ -40,6 +40,15 @@ class MemoryStore:
             rec = self._data.get(key_id)
             if rec is not None:  # partial update: only usage fields change
                 self._data[key_id] = rec.replace(last_used_at=when, use_count=rec.use_count + 1)
+
+    def save_rotation(self, new: KeyRecord, old: KeyRecord) -> bool:
+        with self._lock:
+            current = self._data.get(old.key_id)
+            if current is None or current.revoked_at is not None:
+                return False  # revoked (or deleted) meanwhile: the revocation wins, nothing is written
+            self._data[old.key_id] = current.replace(**rotation_fields(old))
+            self._data[new.key_id] = new.copy()
+            return True
 
     def list(self, owner: Optional[str] = None, *, include_inactive: bool = False,
              now: Optional[datetime] = None) -> List[KeyRecord]:
